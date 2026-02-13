@@ -1,0 +1,13 @@
+# Node
+node_modules/
+
+# Playwright
+playwright-report/
+playwright/.cache/
+
+# Runs / artifacts
+form-filler/logs/
+form-filler/screenshots/
+
+# OS
+.DS_Store
