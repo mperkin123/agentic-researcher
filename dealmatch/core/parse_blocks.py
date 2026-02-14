@@ -5,8 +5,19 @@ import urllib.parse
 from typing import Dict, List, Tuple
 
 
+_ZW_CHARS = "\ufeff\u200b\u200c\u200d\u2060"
+
+
+def _clean(s: str) -> str:
+    s = s or ""
+    # remove zero-width chars / BOM that often appear in copy-pastes
+    for ch in _ZW_CHARS:
+        s = s.replace(ch, "")
+    return s
+
+
 def domain_only(s: str) -> str:
-    s = (s or "").strip()
+    s = _clean((s or "").strip())
     if not s:
         return ""
     # accept URLs
@@ -24,7 +35,7 @@ _re_urlish = re.compile(r"(?i)^(https?://|www\.|(?:[a-z0-9-]+\.)+[a-z]{2,})(/.*)
 
 
 def looks_like_urlish(line: str) -> bool:
-    t = (line or "").strip()
+    t = _clean((line or "").strip())
     if not t:
         return False
     return bool(_re_urlish.match(t))
@@ -64,7 +75,7 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
        (any URL-ish token starts a new seed block; everything else becomes a part token)
     """
 
-    raw = (text or "").strip()
+    raw = _clean((text or "")).strip()
     if not raw:
         return {}
 
@@ -78,8 +89,8 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
             if not ln.strip():
                 continue
             cols = ln.split("\t")
-            col0 = (cols[0] or "").strip() if len(cols) >= 1 else ""
-            col1 = (cols[1] or "").strip() if len(cols) >= 2 else ""
+            col0 = _clean((cols[0] or "")).strip() if len(cols) >= 1 else ""
+            col1 = _clean((cols[1] or "")).strip() if len(cols) >= 2 else ""
             if col0:
                 if looks_like_urlish(col0):
                     seed = domain_only(col0)
@@ -105,6 +116,8 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
             toks = shlex.split(raw)
         except Exception:
             toks = re.split(r"\s+", raw)
+
+        toks = [_clean(t) for t in toks]
 
         seed = ""
         out: Dict[str, List[str]] = {}
