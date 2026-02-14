@@ -68,10 +68,34 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
     if not raw:
         return {}
 
+    lines = [ln.rstrip("\n") for ln in raw.splitlines()]
+
+    # TSV mode (Excel-friendly): domain<TAB>item, domain may be blank to mean "same as above".
+    if any("\t" in ln for ln in lines):
+        seed = ""
+        out: Dict[str, List[str]] = {}
+        for ln in lines:
+            if not ln.strip():
+                continue
+            cols = ln.split("\t")
+            col0 = (cols[0] or "").strip() if len(cols) >= 1 else ""
+            col1 = (cols[1] or "").strip() if len(cols) >= 2 else ""
+            if col0:
+                if looks_like_urlish(col0):
+                    seed = domain_only(col0)
+                    if seed:
+                        out.setdefault(seed, [])
+                else:
+                    # if first col isn't urlish, treat it as item under current seed
+                    col1 = (col0 + (" " + col1 if col1 else "")).strip()
+            if seed and col1:
+                out.setdefault(seed, []).append(col1)
+        return _dedupe(out)
+
     # Heuristic: if the paste is mostly one huge line or very long lines, parse by whitespace tokens.
-    lines = [ln.strip() for ln in raw.splitlines()]
-    long_line = any(len(ln) > 260 for ln in lines)
-    few_lines = len([ln for ln in lines if ln]) <= 3
+    stripped_lines = [ln.strip() for ln in lines]
+    long_line = any(len(ln) > 260 for ln in stripped_lines)
+    few_lines = len([ln for ln in stripped_lines if ln]) <= 3
 
     if long_line or few_lines:
         # Token mode
@@ -94,8 +118,8 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
 
     # Line mode
     seed = ""
-    out = {}
-    for ln in lines:
+    out: Dict[str, List[str]] = {}
+    for ln in stripped_lines:
         if not ln:
             continue
         if looks_like_urlish(ln):
