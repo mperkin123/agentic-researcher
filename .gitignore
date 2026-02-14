@@ -1,13 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
 # Node
 node_modules/
 
-# Playwright
-playwright-report/
-playwright/.cache/
+# Data / outputs
+*.out
+*.ndjson
+*.jsonl
+*.lock
+*.sqlite
+*.db
+/data/
+/sqlite_runs/
 
-# Runs / artifacts
-form-filler/logs/
-form-filler/screenshots/
+# Local configs (provide via env)
+serper_conf.json
 
 # OS
 .DS_Store
