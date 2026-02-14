@@ -20,7 +20,7 @@ def domain_only(s: str) -> str:
     return host
 
 
-_re_urlish = re.compile(r"(?i)^(https?://|www\.|[a-z0-9-]+\.[a-z]{2,})(/.*)?$")
+_re_urlish = re.compile(r"(?i)^(https?://|www\.|(?:[a-z0-9-]+\.)+[a-z]{2,})(/.*)?$")
 
 
 def looks_like_urlish(line: str) -> bool:
@@ -30,18 +30,71 @@ def looks_like_urlish(line: str) -> bool:
     return bool(_re_urlish.match(t))
 
 
+def _dedupe(out: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    for s, toks in list(out.items()):
+        seen = set()
+        deduped: List[str] = []
+        for t in toks:
+            k = (t or "").strip()
+            if not k:
+                continue
+            lk = k.lower()
+            if lk in seen:
+                continue
+            seen.add(lk)
+            deduped.append(k)
+        out[s] = deduped
+    return out
+
+
 def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
     """Parse textarea text into {seed_domain: [part_tokens...]}
 
-    Format: blocks separated by blank lines; first line of a block is a URL/domain.
-    But we also handle continuous paste: any URL-ish line starts a new block.
+    Supported input styles:
+    1) Preferred (line-based blocks):
+       <seed-url>
+       <part token>
+       <part token>
+
+       <seed-url>
+       ...
+
+    2) Space-separated mega-line paste:
+       seed1.com PN1 PN2 seed2.com PN3 ...
+       (any URL-ish token starts a new seed block; everything else becomes a part token)
     """
 
-    lines = [ln.strip() for ln in (text or "").splitlines()]
+    raw = (text or "").strip()
+    if not raw:
+        return {}
 
+    # Heuristic: if the paste is mostly one huge line or very long lines, parse by whitespace tokens.
+    lines = [ln.strip() for ln in raw.splitlines()]
+    long_line = any(len(ln) > 260 for ln in lines)
+    few_lines = len([ln for ln in lines if ln]) <= 3
+
+    if long_line or few_lines:
+        # Token mode
+        toks = re.split(r"\s+", raw)
+        seed = ""
+        out: Dict[str, List[str]] = {}
+        for tok in toks:
+            tok = (tok or "").strip()
+            if not tok:
+                continue
+            if looks_like_urlish(tok):
+                seed = domain_only(tok)
+                if seed:
+                    out.setdefault(seed, [])
+                continue
+            if not seed:
+                continue
+            out[seed].append(tok)
+        return _dedupe(out)
+
+    # Line mode
     seed = ""
-    out: Dict[str, List[str]] = {}
-
+    out = {}
     for ln in lines:
         if not ln:
             continue
@@ -51,24 +104,7 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
                 out.setdefault(seed, [])
             continue
         if not seed:
-            # ignore leading tokens until first seed line
             continue
-        tok = ln.strip()
-        if tok:
-            out[seed].append(tok)
+        out[seed].append(ln)
 
-    # de-dupe within seed, preserve order
-    for s, toks in list(out.items()):
-        seen = set()
-        deduped = []
-        for t in toks:
-            k = t.strip()
-            if not k:
-                continue
-            if k.lower() in seen:
-                continue
-            seen.add(k.lower())
-            deduped.append(k)
-        out[s] = deduped
-
-    return out
+    return _dedupe(out)
