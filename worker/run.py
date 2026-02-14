@@ -163,6 +163,7 @@ async def adapt_strategy(db: Session, run: Run, payload: dict):
 
 
 async def worker_loop(poll_s: float = 1.0):
+    print(f"worker_loop: starting poll_s={poll_s}", flush=True)
     while True:
         db = SessionLocal()
         try:
@@ -173,6 +174,8 @@ async def worker_loop(poll_s: float = 1.0):
                 db.close()
                 await asyncio.sleep(poll_s)
                 continue
+
+            print(f"worker_loop: picked task id={task.id} type={task.type} run_id={task.run_id}", flush=True)
 
             task.status = TaskStatus.running
             task.started_at = datetime.utcnow()
@@ -188,16 +191,22 @@ async def worker_loop(poll_s: float = 1.0):
 
             try:
                 if task.type == TaskType.propose_targets:
+                    print(f"task {task.id}: propose_targets starting", flush=True)
                     res = await propose_targets(db, run)
+                    print(f"task {task.id}: propose_targets done: {res}", flush=True)
                 elif task.type == TaskType.adapt_strategy:
+                    print(f"task {task.id}: adapt_strategy starting", flush=True)
                     res = await adapt_strategy(db, run, task.payload or {})
+                    print(f"task {task.id}: adapt_strategy done", flush=True)
                 else:
                     res = {"status": "noop"}
                 task.status = TaskStatus.done
                 task.result = res
             except Exception as e:
+                import traceback
                 task.status = TaskStatus.error
                 task.error = repr(e)
+                print(f"task {task.id}: ERROR {e!r}\n{traceback.format_exc()}", flush=True)
             task.finished_at = datetime.utcnow()
             db.commit()
         finally:

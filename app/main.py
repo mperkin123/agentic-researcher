@@ -173,6 +173,41 @@ def start_run(run_id: int, db: Session = Depends(db_session)):
     return {"id": r.id, "status": r.status, "task_enqueued": t.type}
 
 
+@app.get("/runs/{run_id}")
+def get_run(run_id: int, db: Session = Depends(db_session)):
+    r = db.get(Run, run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    return {
+        "id": r.id,
+        "status": r.status,
+        "seed_domains": r.seed_domains,
+        "seed_phrases_keys": list((r.seed_phrases or {}).keys()),
+    }
+
+
+@app.get("/runs/{run_id}/tasks")
+def list_tasks(run_id: int, db: Session = Depends(db_session)):
+    rows = (
+        db.execute(select(Task).where(Task.run_id == run_id).order_by(Task.id.asc()).limit(500))
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": t.id,
+            "type": t.type,
+            "status": t.status,
+            "created_at": t.created_at,
+            "started_at": t.started_at,
+            "finished_at": t.finished_at,
+            "error": t.error,
+            "result": t.result,
+        }
+        for t in rows
+    ]
+
+
 @app.get("/runs/{run_id}/targets")
 def list_targets(run_id: int, status: str | None = None, db: Session = Depends(db_session)):
     q = select(Target).where(Target.run_id == run_id)
