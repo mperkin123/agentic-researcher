@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: agentic-researcher-web
+    env: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agentic-researcher-db
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: OPENAI_PLANNER_MODEL
+        value: gpt-5
+      - key: OPENAI_WORKER_MODEL
+        value: gpt-4.1-mini
+    dockerCommand: ./bin/web_start.sh
+
+  - type: worker
+    name: agentic-researcher-worker
+    env: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agentic-researcher-db
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: OPENAI_PLANNER_MODEL
+        value: gpt-5
+      - key: OPENAI_WORKER_MODEL
+        value: gpt-4.1-mini
+    dockerCommand: ./bin/worker_start.sh
+
+databases:
+  - name: agentic-researcher-db
+    plan: starter

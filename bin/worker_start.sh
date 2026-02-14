@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure schema exists before worker starts pulling tasks
+if command -v alembic >/dev/null 2>&1; then
+  echo "Running alembic migrations..." >&2
+  alembic upgrade head || true
+fi
+
+exec python -m worker.run

@@ -1,4 +1,4 @@
-# dealmatch (API + worker)
+# Agentic Researcher (API + worker)
 
 Deployable human-in-the-loop domain discovery + verification + graph building.
 
@@ -25,6 +25,23 @@ python -m worker.run
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL_STRATEGY` (optional)
 - `SERPER_API_KEY`
+
+## Render deployment
+
+This repo includes a `render.yaml` blueprint that creates:
+- a Postgres database
+- a Web service (FastAPI)
+- a Worker service (background tasks)
+
+On Render: **New → Blueprint** and select this repo.
+
+You must set secrets:
+- `OPENAI_API_KEY`
+- `SERPER_API_KEY`
+
+Optional overrides:
+- `OPENAI_PLANNER_MODEL` (default `gpt-5`)
+- `OPENAI_WORKER_MODEL` (default `gpt-4.1-mini`)
 
 ## Notes
 
