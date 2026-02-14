@@ -98,8 +98,14 @@ def parse_seed_parts_blocks(text: str) -> Dict[str, List[str]]:
     few_lines = len([ln for ln in stripped_lines if ln]) <= 3
 
     if long_line or few_lines:
-        # Token mode
-        toks = re.split(r"\s+", raw)
+        # Token mode. Prefer shell-style parsing so quotes work (Excel one-cell pastes).
+        import shlex
+
+        try:
+            toks = shlex.split(raw)
+        except Exception:
+            toks = re.split(r"\s+", raw)
+
         seed = ""
         out: Dict[str, List[str]] = {}
         for tok in toks:
