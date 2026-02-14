@@ -98,11 +98,64 @@ async def propose_targets(db: Session, run: Run):
     return {"queries": queries[:10], "proposed": added, "total_domains": len(domains)}
 
 
+async def adapt_strategy(db: Session, run: Run, payload: dict):
+    strat = Strategy.from_dict(run.strategy or {})
+    planner_model, worker_model = strategy_models()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "query_templates": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 40},
+            "block_substr": {"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 80},
+            "propose_batch": {"type": "integer", "minimum": 10, "maximum": 300},
+            "serper_num": {"type": "integer", "minimum": 3, "maximum": 20},
+            "notes": {"type": "string"},
+        },
+        "required": ["query_templates", "block_substr", "propose_batch", "serper_num"],
+        "additionalProperties": False,
+    }
+
+    accepted = payload.get("accepted") or []
+    rejected = payload.get("rejected") or []
+    notes = payload.get("notes") or ""
+
+    prompt = (
+        "You are updating a search strategy to discover TARGET DOMAINS for an aviation parts supplier campaign.\n"
+        "We will use Serper (google.serper.dev/search).\n\n"
+        "Constraints:\n"
+        "- Output ONLY JSON matching the schema.\n"
+        "- query_templates should be reusable query strings; you may include {phrase} placeholder.\n"
+        "- block_substr should include domain substrings to exclude (e.g. social sites, business databases).\n\n"
+        f"Seeds: {run.seed_domains}\n"
+        f"Seed phrases: {run.seed_phrases}\n\n"
+        f"Directions: {run.directions}\n\n"
+        f"Current strategy: {strat.to_dict()}\n\n"
+        f"Feedback accepted domains: {accepted}\n"
+        f"Feedback rejected domains: {rejected}\n"
+        f"Additional notes: {notes}\n"
+    )
+
+    resp = await responses_create(model=planner_model, input_text=prompt, json_schema=schema, temperature=0.2)
+    j = extract_json(resp)
+    if not isinstance(j, dict):
+        return {"status": "no_change", "reason": "llm_returned_non_object"}
+
+    # sanitize
+    new_strat = Strategy.from_dict({
+        "query_templates": j.get("query_templates") or strat.query_templates,
+        "block_substr": j.get("block_substr") or strat.block_substr,
+        "propose_batch": j.get("propose_batch") or strat.propose_batch,
+        "serper_num": j.get("serper_num") or strat.serper_num,
+    })
+    run.strategy = new_strat.to_dict()
+    db.commit()
+    return {"status": "updated", "strategy": run.strategy, "llm_notes": j.get("notes", "")}
+
+
 async def worker_loop(poll_s: float = 1.0):
     while True:
         db = SessionLocal()
         try:
-            # pick one pending task
             task = db.execute(
                 select(Task).where(Task.status == TaskStatus.pending).order_by(Task.id.asc()).limit(1)
             ).scalar_one_or_none()
@@ -126,6 +179,8 @@ async def worker_loop(poll_s: float = 1.0):
             try:
                 if task.type == TaskType.propose_targets:
                     res = await propose_targets(db, run)
+                elif task.type == TaskType.adapt_strategy:
+                    res = await adapt_strategy(db, run, task.payload or {})
                 else:
                     res = {"status": "noop"}
                 task.status = TaskStatus.done

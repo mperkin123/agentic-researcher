@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agentic Researcher – Run {{ run.id }}</title>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; margin: 24px; }
+      .meta { color: #444; margin-bottom: 16px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 6px; border-bottom: 1px solid #eee; vertical-align: top; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #f3f4f6; font-size: 12px; }
+      .btn { padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+      .btn-yes { border-color: #16a34a; }
+      .btn-no { border-color: #dc2626; }
+      .btn-primary { background: #111827; color: white; border-color: #111827; }
+      textarea { width: 100%; min-height: 80px; }
+    </style>
+  </head>
+  <body>
+    <h1>Agentic Researcher</h1>
+    <div class="meta">
+      <div>Run <span class="pill">#{{ run.id }}</span> — status: <span class="pill">{{ run.status }}</span></div>
+      <div>Seeds: {% for s in run.seed_domains %}<span class="pill">{{ s }}</span> {% endfor %}</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Proposed target domains ({{ targets|length }})</h2>
+        <form method="post" action="/runs/{{ run.id }}/feedback">
+          <table>
+            <thead>
+              <tr><th>Domain</th><th>Action</th><th>Evidence</th></tr>
+            </thead>
+            <tbody>
+              {% for t in targets %}
+              <tr>
+                <td><code>{{ t.domain }}</code><br/><span class="pill">{{ t.status }}</span></td>
+                <td>
+                  <label><input type="radio" name="d:{{ t.domain }}" value="accept" /> accept</label><br/>
+                  <label><input type="radio" name="d:{{ t.domain }}" value="reject" /> reject</label>
+                </td>
+                <td style="max-width: 420px;">
+                  <pre style="white-space: pre-wrap; margin: 0; font-size: 12px;">{{ t.evidence | tojson(indent=2) }}</pre>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+
+          <h3>Notes to the agent (optional)</h3>
+          <textarea name="notes" placeholder="What should it change? e.g. exclude repair shops, prefer distributors, add negative keywords, etc."></textarea>
+
+          <div style="margin-top: 10px; display:flex; gap: 8px;">
+            <button class="btn btn-primary" type="submit">Submit feedback</button>
+            <a class="btn" href="/runs/{{ run.id }}/review">Refresh</a>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Run details</h2>
+        <h3>Directions</h3>
+        <pre style="white-space: pre-wrap;">{{ run.directions }}</pre>
+
+        <h3>Strategy (current)</h3>
+        <pre style="white-space: pre-wrap;">{{ run.strategy | tojson(indent=2) }}</pre>
+      </div>
+    </div>
+  </body>
+</html>
