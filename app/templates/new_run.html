@@ -24,8 +24,14 @@
       <h3>Seeds + parts</h3>
       <textarea name="blocks" placeholder="https://example.com\nPN-123\nFuel pump 456\n\nhttps://example2.com\n...">{{ default_blocks or '' }}</textarea>
 
-      <h3>Directions (optional)</h3>
-      <input type="text" name="directions" value="{{ directions or '' }}" placeholder="Domains only. Build part→seller graph. Propose batches for validation." />
+      <details style="margin-top: 12px;">
+        <summary><b>Advanced</b> (optional)</summary>
+        <div style="margin-top: 10px;">
+          <label for="directions"><b>Directions</b> (optional)</label>
+          <input id="directions" type="text" name="directions" value="{{ directions or '' }}" placeholder="Domains only. Build part→seller graph. Propose batches for validation." />
+          <p class="hint" style="margin-top:6px;">Use this to steer the agent (e.g. prefer inventory/RFQ sellers, exclude repair stations, add negatives).</p>
+        </div>
+      </details>
 
       <div style="margin-top: 12px;">
         <button class="btn btn-primary" type="submit">Validate inputs</button>
