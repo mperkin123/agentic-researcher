@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PYTHONPATH="/app:${PYTHONPATH:-}"
+
 # Run DB migrations (best-effort for now)
 if command -v alembic >/dev/null 2>&1; then
   echo "Running alembic migrations..." >&2
