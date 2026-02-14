@@ -42,4 +42,4 @@ services:
 
 databases:
   - name: agentic-researcher-db
-    plan: starter
+    plan: basic
