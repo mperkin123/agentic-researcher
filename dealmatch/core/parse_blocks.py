@@ -7,12 +7,28 @@ from typing import Dict, List, Tuple
 
 _ZW_CHARS = "\ufeff\u200b\u200c\u200d\u2060"
 
+# Common Excel/Word punctuation/whitespace oddities
+_NBSP = "\u00a0"  # non-breaking space
+_NARROW_NBSP = "\u202f"
+_THIN_SPACE = "\u2009"
+_SMART_QUOTES = {
+    "\u201c": '"',  # left double
+    "\u201d": '"',  # right double
+    "\u2018": "'",  # left single
+    "\u2019": "'",  # right single
+}
+
 
 def _clean(s: str) -> str:
     s = s or ""
     # remove zero-width chars / BOM that often appear in copy-pastes
     for ch in _ZW_CHARS:
         s = s.replace(ch, "")
+    # normalize weird spaces
+    s = s.replace(_NBSP, " ").replace(_NARROW_NBSP, " ").replace(_THIN_SPACE, " ")
+    # normalize smart quotes to ASCII quotes so shlex can parse them
+    for k, v in _SMART_QUOTES.items():
+        s = s.replace(k, v)
     return s
 
 
