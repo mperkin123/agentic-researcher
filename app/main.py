@@ -84,8 +84,7 @@ async def preview_run(request: Request, blocks: str = Form(...), directions: str
     )
 
 
-@app.post("/runs/create_from_blocks")
-def create_from_blocks(blocks: str = Form(...), directions: str = Form(default=""), db: Session = Depends(db_session)):
+def _create_run_from_blocks(*, blocks: str, directions: str, db: Session) -> Run:
     seed_parts = parse_seed_parts_blocks(blocks)
     seeds = list(seed_parts.keys())
     if len(seeds) < 1:
@@ -110,8 +109,37 @@ def create_from_blocks(blocks: str = Form(...), directions: str = Form(default="
     r.status = RunStatus.running
     db.add(Task(run_id=r.id, type=TaskType.propose_targets))
     db.commit()
+    return r
 
+
+@app.post("/runs/create_from_blocks")
+def create_from_blocks(blocks: str = Form(...), directions: str = Form(default=""), db: Session = Depends(db_session)):
+    r = _create_run_from_blocks(blocks=blocks, directions=directions, db=db)
     return RedirectResponse(url=f"/runs/{r.id}/review", status_code=303)
+
+
+@app.post("/runs/create_from_text")
+async def create_from_text(request: Request, db: Session = Depends(db_session)):
+    """Programmatic escape hatch.
+
+    Accepts either:
+    - text/plain body: raw blocks text
+    - application/json: {"blocks": "...", "directions": "..."}
+
+    Returns JSON {id, review_url}.
+    """
+    ct = (request.headers.get("content-type") or "").lower()
+    directions = ""
+    blocks = ""
+    if "application/json" in ct:
+        j = await request.json()
+        blocks = (j.get("blocks") or "").strip()
+        directions = (j.get("directions") or "").strip()
+    else:
+        blocks = (await request.body()).decode("utf-8", errors="replace").strip()
+
+    r = _create_run_from_blocks(blocks=blocks, directions=directions, db=db)
+    return {"id": r.id, "review_url": f"/runs/{r.id}/review"}
 
 
 @app.post("/runs")
