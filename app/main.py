@@ -55,9 +55,17 @@ async def preview_run(request: Request, blocks: str = Form(...), directions: str
         err = "No part tokens detected under seeds. Add part numbers/names on lines after each seed."
 
     if err:
+        # Debug help: show what the parser saw (first chars + codepoints)
+        head = blocks[:200]
+        dbg = {
+            "seeds_detected": seeds,
+            "counts": counts,
+            "head_repr": repr(head),
+            "head_codepoints": [hex(ord(c)) for c in head[:80]],
+        }
         return templates.TemplateResponse(
             "new_run.html",
-            {"request": request, "default_blocks": blocks, "directions": directions, "error": err},
+            {"request": request, "default_blocks": blocks, "directions": directions, "error": err, "debug": dbg},
             status_code=400,
         )
 

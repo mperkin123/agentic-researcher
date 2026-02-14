@@ -19,6 +19,12 @@
     <p class="hint">Paste 3 blocks. Best: copy from Excel as 2 columns (<b>seed URL/domain</b> and <b>part token</b>) — the app supports tab-separated paste. Also works: seed on its own line, then one part per line.</p>
 
     {% if error %}<p style="color:#b91c1c;"><b>Error:</b> {{ error }}</p>{% endif %}
+    {% if debug %}
+      <details style="margin: 10px 0;">
+        <summary><b>Debug (click to expand)</b></summary>
+        <pre style="white-space: pre-wrap;">{{ debug | tojson(indent=2) }}</pre>
+      </details>
+    {% endif %}
 
     <form method="post" action="/runs/preview">
       <h3>Seeds + parts</h3>
