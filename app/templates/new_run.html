@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agentic Researcher – New Run</title>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; margin: 24px; }
+      textarea { width: 100%; min-height: 320px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas; }
+      input[type=text] { width: 100%; }
+      .btn { padding: 8px 12px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+      .btn-primary { background: #111827; color: white; border-color: #111827; }
+      .hint { color: #444; }
+      code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>New run</h1>
+    <p class="hint">Paste 3 blocks. Each block starts with a seed <b>URL</b> (or domain), followed by part numbers / part names (one per line).</p>
+
+    {% if error %}<p style="color:#b91c1c;"><b>Error:</b> {{ error }}</p>{% endif %}
+
+    <form method="post" action="/runs/preview">
+      <h3>Seeds + parts</h3>
+      <textarea name="blocks" placeholder="https://example.com\nPN-123\nFuel pump 456\n\nhttps://example2.com\n...">{{ default_blocks or '' }}</textarea>
+
+      <h3>Directions (optional)</h3>
+      <input type="text" name="directions" value="{{ directions or '' }}" placeholder="Domains only. Build part→seller graph. Propose batches for validation." />
+
+      <div style="margin-top: 12px;">
+        <button class="btn btn-primary" type="submit">Validate inputs</button>
+      </div>
+    </form>
+
+    <hr/>
+    <p class="hint">Existing endpoints: <code>POST /runs</code>, <code>POST /runs/{id}/start</code>, <code>GET /runs/{id}/review</code>.</p>
+  </body>
+</html>

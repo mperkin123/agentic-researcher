@@ -42,10 +42,10 @@ async def propose_targets(db: Session, run: Run):
         "additionalProperties": False,
     }
     prompt = (
-        "You are proposing search queries to discover aircraft parts supplier DOMAINS. "
+        "You are proposing Google search queries (for Serper) to discover SELLER DOMAINS for a list of part numbers / part names. "
         "Return queries only; do not include URLs.\n\n"
-        f"Seeds: {run.seed_domains}\n"
-        f"Seed phrases by seed: {run.seed_phrases}\n\n"
+        f"Seeds (provenance only): {run.seed_domains}\n"
+        f"Parts by seed: {run.seed_phrases}\n\n"
         f"Directions: {run.directions}\n\n"
         f"Current query templates: {strat.query_templates}\n"
         "Output JSON with key 'queries'."
@@ -69,6 +69,7 @@ async def propose_targets(db: Session, run: Run):
 
     # Serper search each query, collect domains from results
     domains = []
+    evidence_rows = []
     for q in queries[:10]:
         s = await serper_search(q, num=strat.serper_num)
         for r in (s.get("organic") or []):
@@ -79,6 +80,13 @@ async def propose_targets(db: Session, run: Run):
             if any(b in d for b in strat.block_substr):
                 continue
             domains.append(d)
+            evidence_rows.append({
+                "domain": d,
+                "query": q,
+                "link": link,
+                "title": r.get("title"),
+                "snippet": r.get("snippet") or r.get("description"),
+            })
     # unique preserve order
     seen = set()
     domains = [d for d in domains if not (d in seen or seen.add(d))]
@@ -91,7 +99,9 @@ async def propose_targets(db: Session, run: Run):
         exists = db.execute(select(Target).where(Target.run_id == run.id, Target.domain == d)).scalar_one_or_none()
         if exists:
             continue
-        db.add(Target(run_id=run.id, domain=d, score=0.5, evidence={"source": "serper", "queries": queries[:10]}))
+        # attach a few evidence hits for this domain
+        hits = [e for e in evidence_rows if e.get("domain") == d][:3]
+        db.add(Target(run_id=run.id, domain=d, score=0.5, evidence={"source": "serper", "queries": queries[:10], "hits": hits}))
         added += 1
     run.status = RunStatus.waiting_feedback
     db.commit()
