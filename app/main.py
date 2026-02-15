@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from fastapi.middleware.cors import CORSMiddleware
+
 from dealmatch.core.models import (
     FeedbackEvent,
     Run,
@@ -24,6 +26,18 @@ from dealmatch.core.strategy import Strategy
 from dealmatch.db.session import db_session
 
 app = FastAPI(title="Agentic Researcher")
+
+# --- CORS (added by patch script) ---
+app.add_middleware(
+    CORSMiddleware,
+    # Allow Lovable hosted apps and local dev
+    allow_origin_regex=r"^(https://.*\.lovable\.app|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# --- end CORS ---
+
 templates = Jinja2Templates(directory="app/templates")
 
 
