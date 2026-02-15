@@ -4,7 +4,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,14 @@ from dealmatch.core.models import (
     DemoEvent,
     DemoEventType,
     DemoRunControl,
+    DemoSerperQuery,
+    DemoSerperQueryStatus,
+    DemoSupplier,
+    DemoSupplierStatus,
+    DemoEdge,
+    DemoEdgeStatus,
+    DemoPart,
+    DemoPartStatus,
 )
 from dealmatch.core.parse_blocks import parse_seed_parts_blocks
 from dealmatch.core.strategy import Strategy
@@ -335,6 +343,38 @@ def demo_control(run_id: int, db: Session = Depends(db_session)):
         "serper_calls_used": c.serper_calls_used,
         "serper_budget": c.serper_budget,
         "updated_at": getattr(c, "updated_at", None),
+    }
+
+
+@app.get("/runs/{run_id}/demo/stats")
+def demo_stats(run_id: int, db: Session = Depends(db_session)):
+    """Debug: snapshot of demo tables so we can see if the worker is making progress."""
+
+    def grouped_counts(model, status_col, enum_cls=None):
+        rows = db.execute(
+            select(status_col, func.count()).where(getattr(model, "run_id") == run_id).group_by(status_col)
+        ).all()
+        out = {}
+        for st, cnt in rows:
+            k = st.value if hasattr(st, "value") else str(st)
+            out[k] = int(cnt)
+        return out
+
+    parts_total = int(db.execute(select(func.count()).select_from(DemoPart).where(DemoPart.run_id == run_id)).scalar() or 0)
+    edges_total = int(db.execute(select(func.count()).select_from(DemoEdge).where(DemoEdge.run_id == run_id)).scalar() or 0)
+    suppliers_total = int(db.execute(select(func.count()).select_from(DemoSupplier).where(DemoSupplier.run_id == run_id)).scalar() or 0)
+    queries_total = int(db.execute(select(func.count()).select_from(DemoSerperQuery).where(DemoSerperQuery.run_id == run_id)).scalar() or 0)
+
+    return {
+        "run_id": run_id,
+        "parts_total": parts_total,
+        "parts_by_status": grouped_counts(DemoPart, DemoPart.status, DemoPartStatus),
+        "suppliers_total": suppliers_total,
+        "suppliers_by_status": grouped_counts(DemoSupplier, DemoSupplier.status, DemoSupplierStatus),
+        "queries_total": queries_total,
+        "queries_by_status": grouped_counts(DemoSerperQuery, DemoSerperQuery.status, DemoSerperQueryStatus),
+        "edges_total": edges_total,
+        "edges_by_status": grouped_counts(DemoEdge, DemoEdge.status, DemoEdgeStatus),
     }
 
 
