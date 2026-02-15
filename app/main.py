@@ -26,7 +26,8 @@ def home():
     <h1>Agentic Researcher</h1>
     <p>API is running.</p>
     <ul>
-      <li><a href="/runs/new">New run (UI)</a></li>
+      <li><a href="/runs/new">New run (hardcoded)</a></li>
+      <li><a href="/runs/new/custom">New run (custom UI)</a></li>
       <li>POST /runs</li>
       <li>POST /runs/{id}/start</li>
       <li>GET /runs/{id}/review</li>
@@ -34,8 +35,37 @@ def home():
     </body></html>"""
 
 
-@app.get("/runs/new", response_class=HTMLResponse)
-def new_run(request: Request):
+@app.get("/runs/new")
+def new_run_hardcoded(db: Session = Depends(db_session)):
+    """Create+start a run from hardcoded seed blocks, then redirect to review.
+
+    This exists purely to make browser testing easy (no curl/webhooks).
+    """
+
+    # Prefer an env var override; fall back to repo file.
+    import os
+
+    blocks = (os.environ.get("DEFAULT_RUN_BLOCKS") or "").strip()
+    if not blocks:
+        # repo-local default
+        try:
+            from pathlib import Path
+
+            seeds_path = (Path(__file__).resolve().parent.parent / "seeds_marc.txt").resolve()
+            with open(seeds_path, "r", encoding="utf-8", errors="replace") as f:
+                blocks = (f.read() or "").strip()
+        except FileNotFoundError:
+            blocks = ""
+
+    if not blocks:
+        raise HTTPException(500, "no hardcoded seed blocks available")
+
+    r = _create_run_from_blocks(blocks=blocks, directions="", db=db)
+    return RedirectResponse(url=f"/runs/{r.id}/review", status_code=303)
+
+
+@app.get("/runs/new/custom", response_class=HTMLResponse)
+def new_run_custom(request: Request):
     return templates.TemplateResponse("new_run.html", {"request": request, "default_blocks": "", "directions": ""})
 
 
