@@ -98,7 +98,10 @@ async def llm_validate_part(tok: str) -> tuple[bool, float, str]:
         f"TOKEN: {tok!r}\n"
         "Criteria: part numbers often include digits and dashes; part names are short but specific; reject generic words, sentences, and garbage."
     )
-    resp = await responses_create(model=worker, input_text=prompt, json_schema=schema, temperature=0.1)
+    resp = await asyncio.wait_for(
+        responses_create(model=worker, input_text=prompt, json_schema=schema, temperature=0.1),
+        timeout=float(os.getenv("DEMO_LLM_TIMEOUT_S", "8")),
+    )
     j = extract_json(resp) or {}
     return bool(j.get("is_part")), float(j.get("confidence") or 0.5), (j.get("reason") or "").strip()
 
@@ -124,7 +127,10 @@ async def llm_qualify_supplier(domain: str, homepage_text: str) -> tuple[bool, f
         f"HOMEPAGE TEXT SNIPPET:\n{text}\n\n"
         "Answer true only if it's clearly relevant to aviation parts."
     )
-    resp = await responses_create(model=worker, input_text=prompt, json_schema=schema, temperature=0.1)
+    resp = await asyncio.wait_for(
+        responses_create(model=worker, input_text=prompt, json_schema=schema, temperature=0.1),
+        timeout=float(os.getenv("DEMO_LLM_TIMEOUT_S", "8")),
+    )
     j = extract_json(resp) or {}
     return bool(j.get("is_aircraft_parts_seller")), float(j.get("confidence") or 0.5), (j.get("reason") or "").strip()
 
@@ -232,7 +238,11 @@ async def generate_queries(db: Session, run: Run, target_n: int = 120):
             f"Directions: {run.directions}\n\n"
             "Output JSON {queries:[...]}"
         )
-        resp = await responses_create(model=planner, input_text=prompt, json_schema=schema, temperature=0.2)
+        # Don't let the demo stall if the LLM is slow/down.
+        resp = await asyncio.wait_for(
+            responses_create(model=planner, input_text=prompt, json_schema=schema, temperature=0.2),
+            timeout=float(os.getenv("DEMO_LLM_TIMEOUT_S", "8")),
+        )
         j = extract_json(resp) or {}
         qs = [q.strip() for q in (j.get("queries") or []) if (q or "").strip()]
     except Exception as e:
