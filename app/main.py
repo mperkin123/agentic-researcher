@@ -311,9 +311,31 @@ def demo_start(run_id: int, db: Session = Depends(db_session)):
     c = _ensure_demo_control(db, run_id)
     c.state = "running"
     db.commit()
-    db.add(DemoEvent(run_id=run_id, type=DemoEventType.RUN_STATE, data={"state": c.state, "serper_calls_used": c.serper_calls_used, "now": "Running"}))
+    db.add(
+        DemoEvent(
+            run_id=run_id,
+            type=DemoEventType.RUN_STATE,
+            data={"state": c.state, "serper_calls_used": c.serper_calls_used, "now": "Running"},
+        )
+    )
     db.commit()
     return {"ok": True, "state": c.state}
+
+
+@app.get("/runs/{run_id}/demo/control")
+def demo_control(run_id: int, db: Session = Depends(db_session)):
+    """Debug: return demo control row so we can see if the worker should be running."""
+    c = db.get(DemoRunControl, run_id)
+    if not c:
+        return {"run_id": run_id, "exists": False}
+    return {
+        "run_id": run_id,
+        "exists": True,
+        "state": c.state,
+        "serper_calls_used": c.serper_calls_used,
+        "serper_budget": c.serper_budget,
+        "updated_at": getattr(c, "updated_at", None),
+    }
 
 
 @app.post("/runs/{run_id}/demo/stop")
