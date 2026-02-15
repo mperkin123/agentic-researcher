@@ -280,13 +280,21 @@ def _ensure_demo_control(db: Session, run_id: int) -> DemoRunControl:
 
 @app.get("/demo", response_class=HTMLResponse)
 def demo_home(db: Session = Depends(db_session)):
-    # Single-run demo: redirect to latest run, or create from hardcoded seeds.
-    r = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
+    # Single-run demo: redirect to newest running run if any, else latest run.
+    ctl = db.execute(select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)).scalar_one_or_none()
+    r = db.get(Run, ctl.run_id) if ctl else db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
     if not r:
-        # create via hardcoded seeds
         return RedirectResponse(url="/runs/new", status_code=303)
     _ensure_demo_control(db, r.id)
     return RedirectResponse(url=f"/runs/{r.id}/demo", status_code=303)
+
+
+@app.get("/demo/run")
+def demo_latest_run(db: Session = Depends(db_session)):
+    """Return the active demo run id (newest running), else newest run id."""
+    ctl = db.execute(select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)).scalar_one_or_none()
+    rid = int(ctl.run_id) if ctl else int(db.execute(select(Run.id).order_by(Run.id.desc()).limit(1)).scalar_one_or_none() or 0)
+    return {"run_id": rid}
 
 
 @app.get("/runs/{run_id}/demo", response_class=HTMLResponse)

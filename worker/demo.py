@@ -531,11 +531,18 @@ async def seed_researching_edges(run_id: int):
 async def run_demo_loop():
     print("demo worker: starting", flush=True)
 
-    # Single-run-at-a-time: pick latest run with control row; else do nothing.
+    # Single-run demo: prefer the newest run that is explicitly marked running.
     while True:
         db = SessionLocal()
         try:
-            run = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
+            # Find newest running demo control.
+            running_ctl = db.execute(
+                select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)
+            ).scalar_one_or_none()
+            if running_ctl:
+                run = db.get(Run, running_ctl.run_id)
+            else:
+                run = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
             if not run:
                 await asyncio.sleep(1.0)
                 continue
@@ -558,15 +565,18 @@ async def run_demo_loop():
             tasks.append(asyncio.create_task(scraper_loop(run_id, sem=scr_sem)))
         tasks.append(asyncio.create_task(seed_researching_edges(run_id)))
 
-        # Keep running; if run changes via reset, we'll restart loops.
+        # Keep running; if a different run becomes active (newer running control), restart loops.
         last_run_id = run_id
         while True:
             await asyncio.sleep(1.0)
             db = SessionLocal()
             try:
-                latest = db.execute(select(Run.id).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
-                if latest and latest != last_run_id:
-                    print(f"demo worker: new run detected {latest}, restarting loops", flush=True)
+                running_ctl = db.execute(
+                    select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)
+                ).scalar_one_or_none()
+                active = running_ctl.run_id if running_ctl else db.execute(select(Run.id).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
+                if active and active != last_run_id:
+                    print(f"demo worker: active run changed {last_run_id} -> {active}, restarting loops", flush=True)
                     break
             finally:
                 db.close()
