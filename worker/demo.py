@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from dealmatch.core.models import Run
@@ -644,6 +644,29 @@ async def run_demo_loop():
                     "meta": f"run_id={run_id}",
                     "body": f"serper_concurrency={SERPER_CONCURRENCY} scrape_concurrency={SCRAPE_CONCURRENCY}",
                 })
+
+                # Prime some Serper queries immediately so the demo doesn't depend on lane scheduling.
+                try:
+                    await generate_queries(db, run)
+                    pending_n = db.execute(
+                        select(func.count())
+                        .select_from(DemoSerperQuery)
+                        .where(DemoSerperQuery.run_id == run_id)
+                        .where(DemoSerperQuery.status == DemoSerperQueryStatus.pending)
+                    ).scalar() or 0
+                    emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                        "title": "Query primed",
+                        "meta": f"pending={int(pending_n)}",
+                        "body": "initial query queue created",
+                    })
+                    print(f"demo worker: primed queries pending={int(pending_n)}", flush=True)
+                except Exception as e:
+                    emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                        "title": "Query prime failed",
+                        "meta": "attach",
+                        "body": repr(e),
+                    })
+                    print(f"demo worker: query prime failed {e!r}", flush=True)
             finally:
                 db.close()
 
