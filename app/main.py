@@ -31,7 +31,7 @@ app = FastAPI(title="Agentic Researcher")
 app.add_middleware(
     CORSMiddleware,
     # Allow Lovable hosted apps and local dev
-    allow_origin_regex=r"^(https://.*\.lovable\.app|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$",
+    allow_origin_regex=r"^(https://.*\.(lovable\.app|lovableproject\.com)|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
