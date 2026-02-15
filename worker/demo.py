@@ -191,45 +191,86 @@ async def ensure_parts(db: Session, run: Run):
 
 
 async def generate_queries(db: Session, run: Run, target_n: int = 120):
-    # keep a buffer of pending queries.
+    """Ensure we have pending Serper queries.
+
+    Uses LLM when available, but always falls back to simple templated queries so the demo keeps moving.
+    """
+
     pending = db.execute(
-        select(DemoSerperQuery).where(DemoSerperQuery.run_id == run.id, DemoSerperQuery.status == DemoSerperQueryStatus.pending)
+        select(DemoSerperQuery).where(
+            DemoSerperQuery.run_id == run.id,
+            DemoSerperQuery.status == DemoSerperQueryStatus.pending,
+        )
     ).scalars().all()
     if len(pending) >= 30:
         return
 
-    planner, worker = strategy_models()
-    schema = {
-        "type": "object",
-        "properties": {"queries": {"type": "array", "items": {"type": "string"}, "minItems": 10, "maxItems": 40}},
-        "required": ["queries"],
-        "additionalProperties": False,
-    }
-
     # sample some parts to drive queries
-    parts = db.execute(select(DemoPart.token).where(DemoPart.run_id == run.id, DemoPart.status == DemoPartStatus.validated).limit(120)).scalars().all()
+    parts = db.execute(
+        select(DemoPart.token)
+        .where(DemoPart.run_id == run.id, DemoPart.status == DemoPartStatus.validated)
+        .limit(200)
+    ).scalars().all()
     sample = random.sample(parts, k=min(len(parts), 25)) if parts else []
-    prompt = (
-        "You are generating Google search queries to discover aircraft parts suppliers who sell the given parts. "
-        "Return queries only, no URLs. Prefer queries that find inventory/RFQ seller sites.\n\n"
-        f"Example part tokens: {sample}\n"
-        f"Seeds: {run.seed_domains}\n"
-        f"Directions: {run.directions}\n\n"
-        "Output JSON {queries:[...]}"
-    )
-    resp = await responses_create(model=planner, input_text=prompt, json_schema=schema, temperature=0.2)
-    j = extract_json(resp) or {}
-    qs = [q.strip() for q in (j.get("queries") or []) if (q or "").strip()]
+
+    qs: list[str] = []
+
+    # 1) LLM attempt
+    try:
+        planner, _worker = strategy_models()
+        schema = {
+            "type": "object",
+            "properties": {"queries": {"type": "array", "items": {"type": "string"}, "minItems": 10, "maxItems": 40}},
+            "required": ["queries"],
+            "additionalProperties": False,
+        }
+        prompt = (
+            "You are generating Google search queries (for Serper) to discover aircraft parts suppliers who sell the given parts. "
+            "Return queries only, no URLs. Prefer queries that find inventory/RFQ seller sites.\n\n"
+            f"Example part tokens: {sample}\n"
+            f"Seeds: {run.seed_domains}\n"
+            f"Directions: {run.directions}\n\n"
+            "Output JSON {queries:[...]}"
+        )
+        resp = await responses_create(model=planner, input_text=prompt, json_schema=schema, temperature=0.2)
+        j = extract_json(resp) or {}
+        qs = [q.strip() for q in (j.get("queries") or []) if (q or "").strip()]
+    except Exception as e:
+        emit(db, run_id=run.id, type=DemoEventType.DECISION, data={
+            "title": "LLM query generation failed (fallback)",
+            "meta": "generate_queries",
+            "body": repr(e),
+        })
+        qs = []
+
+    # 2) Fallback templates
     if not qs:
-        return
+        toks = sample or (parts[:10] if parts else [])
+        for t in toks[:10]:
+            qs.append(f'"{t}" aircraft parts supplier')
+            qs.append(f'"{t}" inventory "Request a Quote"')
+        # generic seeds-based queries
+        for sd in (run.seed_domains or [])[:3]:
+            qs.append(f"{sd} competitors aircraft parts")
 
     # insert
+    added = 0
     for q in qs[:40]:
-        exists = db.execute(select(DemoSerperQuery).where(DemoSerperQuery.run_id == run.id, DemoSerperQuery.query == q)).scalar_one_or_none()
+        exists = db.execute(
+            select(DemoSerperQuery).where(DemoSerperQuery.run_id == run.id, DemoSerperQuery.query == q)
+        ).scalar_one_or_none()
         if exists:
             continue
         db.add(DemoSerperQuery(run_id=run.id, query=q, status=DemoSerperQueryStatus.pending))
+        added += 1
     db.commit()
+
+    if added:
+        emit(db, run_id=run.id, type=DemoEventType.DECISION, data={
+            "title": "Queued Serper queries",
+            "meta": f"added={added}",
+            "body": (qs[:5] or []).__repr__(),
+        })
 
 
 async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
@@ -239,97 +280,107 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
         async with sem:
             db = SessionLocal()
             try:
-                run = db.get(Run, run_id)
-                if not run:
-                    return
-                ctl = ensure_control(db, run_id)
-                if ctl.state != "running":
-                    await asyncio.sleep(0.35)
-                    continue
-                if ctl.serper_calls_used >= ctl.serper_budget:
-                    ctl.state = "stopped"
+                try:
+                    run = db.get(Run, run_id)
+                    if not run:
+                        return
+                    ctl = ensure_control(db, run_id)
+                    if ctl.state != "running":
+                        await asyncio.sleep(0.35)
+                        continue
+                    if ctl.serper_calls_used >= ctl.serper_budget:
+                        ctl.state = "stopped"
+                        db.commit()
+                        emit(db, run_id=run_id, type=DemoEventType.RUN_STATE, data={
+                            "state": ctl.state,
+                            "serper_calls_used": ctl.serper_calls_used,
+                            "now": "Budget reached",
+                        })
+                        await asyncio.sleep(0.9)
+                        continue
+
+                    # keep queries stocked
+                    await generate_queries(db, run)
+
+                    q = db.execute(
+                        select(DemoSerperQuery)
+                        .where(DemoSerperQuery.run_id == run_id)
+                        .where(DemoSerperQuery.status == DemoSerperQueryStatus.pending)
+                        .order_by(DemoSerperQuery.id.asc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if not q:
+                        await asyncio.sleep(0.25)
+                        continue
+
+                    q.status = DemoSerperQueryStatus.running
+                    q.lane = lane
+                    q.started_at = _now()
                     db.commit()
+
+                    emit(db, run_id=run_id, type=DemoEventType.SERPER_LANE, data={
+                        "lane": lane,
+                        "meta": "running",
+                        "query": q.query,
+                        "serper_calls_used": ctl.serper_calls_used,
+                    })
+
+                    t0 = time.time()
+                    try:
+                        res = await serper_search(q.query, num=10)
+                        ok = True
+                    except Exception as e:
+                        res = {"error": repr(e)}
+                        ok = False
+
+                    ctl.serper_calls_used += 1
+                    q.finished_at = _now()
+                    q.status = DemoSerperQueryStatus.done if ok else DemoSerperQueryStatus.error
+                    q.result = res
+                    db.commit()
+
+                    took_ms = int((time.time() - t0) * 1000)
+
+                    emit(db, run_id=run_id, type=DemoEventType.SERPER_LANE, data={
+                        "lane": lane,
+                        "meta": f"done ({took_ms}ms)",
+                        "query": q.query,
+                        "serper_calls_used": ctl.serper_calls_used,
+                    })
                     emit(db, run_id=run_id, type=DemoEventType.RUN_STATE, data={
                         "state": ctl.state,
                         "serper_calls_used": ctl.serper_calls_used,
-                        "now": "Budget reached",
+                        "now": f"Serper lane {lane+1}: {q.query}",
                     })
-                    await asyncio.sleep(0.9)
-                    continue
 
-                # keep queries stocked
-                await generate_queries(db, run)
+                    # Extract supplier domains from serper results
+                    org = (res.get("organic") or []) if isinstance(res, dict) else []
+                    domains = []
+                    for r in org:
+                        link = (r.get("link") or "")
+                        d = domain_only(link)
+                        if d:
+                            domains.append(d)
+                    # unique
+                    seen = set(); domains = [d for d in domains if not (d in seen or seen.add(d))]
 
-                q = db.execute(
-                    select(DemoSerperQuery)
-                    .where(DemoSerperQuery.run_id == run_id)
-                    .where(DemoSerperQuery.status == DemoSerperQueryStatus.pending)
-                    .order_by(DemoSerperQuery.id.asc())
-                    .limit(1)
-                ).scalar_one_or_none()
-                if not q:
-                    await asyncio.sleep(0.25)
-                    continue
-
-                q.status = DemoSerperQueryStatus.running
-                q.lane = lane
-                q.started_at = _now()
-                db.commit()
-
-                emit(db, run_id=run_id, type=DemoEventType.SERPER_LANE, data={
-                    "lane": lane,
-                    "meta": "running",
-                    "query": q.query,
-                    "serper_calls_used": ctl.serper_calls_used,
-                })
-
-                t0 = time.time()
-                try:
-                    res = await serper_search(q.query, num=10)
-                    ok = True
+                    added = 0
+                    for d in domains[:MAX_SUPPLIERS_PER_QUERY]:
+                        ex = db.execute(
+                            select(DemoSupplier).where(DemoSupplier.run_id == run_id, DemoSupplier.domain == d)
+                        ).scalar_one_or_none()
+                        if ex:
+                            continue
+                        db.add(DemoSupplier(run_id=run_id, domain=d, status=DemoSupplierStatus.discovered, source_query_id=q.id))
+                        added += 1
+                    db.commit()
                 except Exception as e:
-                    res = {"error": repr(e)}
-                    ok = False
-
-                ctl.serper_calls_used += 1
-                q.finished_at = _now()
-                q.status = DemoSerperQueryStatus.done if ok else DemoSerperQueryStatus.error
-                q.result = res
-                db.commit()
-
-                took_ms = int((time.time() - t0) * 1000)
-
-                emit(db, run_id=run_id, type=DemoEventType.SERPER_LANE, data={
-                    "lane": lane,
-                    "meta": f"done ({took_ms}ms)",
-                    "query": q.query,
-                    "serper_calls_used": ctl.serper_calls_used,
-                })
-                emit(db, run_id=run_id, type=DemoEventType.RUN_STATE, data={
-                    "state": ctl.state,
-                    "serper_calls_used": ctl.serper_calls_used,
-                    "now": f"Serper lane {lane+1}: {q.query}",
-                })
-
-                # Extract supplier domains from serper results
-                org = (res.get("organic") or []) if isinstance(res, dict) else []
-                domains = []
-                for r in org:
-                    link = (r.get("link") or "")
-                    d = domain_only(link)
-                    if d:
-                        domains.append(d)
-                # unique
-                seen = set(); domains = [d for d in domains if not (d in seen or seen.add(d))]
-
-                added = 0
-                for d in domains[:MAX_SUPPLIERS_PER_QUERY]:
-                    ex = db.execute(select(DemoSupplier).where(DemoSupplier.run_id == run_id, DemoSupplier.domain == d)).scalar_one_or_none()
-                    if ex:
-                        continue
-                    db.add(DemoSupplier(run_id=run_id, domain=d, status=DemoSupplierStatus.discovered, source_query_id=q.id))
-                    added += 1
-                db.commit()
+                    emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                        "title": "Serper lane crashed (auto-recovering)",
+                        "meta": f"lane={lane}",
+                        "body": repr(e),
+                    })
+                    await asyncio.sleep(0.6)
 
             finally:
                 db.close()
