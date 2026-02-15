@@ -12,4 +12,4 @@ fi
 # Ensure base tables exist (fresh DB bootstrap)
 python -m dealmatch.db.init_db || true
 
-exec python -m worker.run
+exec python -m worker.demo

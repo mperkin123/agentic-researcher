@@ -6,6 +6,21 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from dealmatch.db.base import Base
 
+# Demo-only models (graph + events)
+from dealmatch.core.demo_models import (  # noqa: F401
+    DemoEdge,
+    DemoEdgeStatus,
+    DemoEvent,
+    DemoEventType,
+    DemoPart,
+    DemoPartStatus,
+    DemoRunControl,
+    DemoSerperQuery,
+    DemoSerperQueryStatus,
+    DemoSupplier,
+    DemoSupplierStatus,
+)
+
 
 class RunStatus(str, enum.Enum):
     created = "created"

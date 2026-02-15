@@ -1,11 +1,24 @@
+import asyncio
+import json
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from dealmatch.core.models import FeedbackEvent, Run, RunStatus, Target, TargetStatus, Task, TaskType
+from dealmatch.core.models import (
+    FeedbackEvent,
+    Run,
+    RunStatus,
+    Target,
+    TargetStatus,
+    Task,
+    TaskType,
+    DemoEvent,
+    DemoEventType,
+    DemoRunControl,
+)
 from dealmatch.core.parse_blocks import parse_seed_parts_blocks
 from dealmatch.core.strategy import Strategy
 from dealmatch.db.session import db_session
@@ -236,6 +249,111 @@ def list_tasks(run_id: int, db: Session = Depends(db_session)):
         }
         for t in rows
     ]
+
+
+# --- Demo UI ---
+
+
+def _ensure_demo_control(db: Session, run_id: int) -> DemoRunControl:
+    c = db.get(DemoRunControl, run_id)
+    if c:
+        return c
+    c = DemoRunControl(run_id=run_id, state="stopped", serper_calls_used=0, serper_budget=5000)
+    db.add(c)
+    db.commit()
+    return c
+
+
+@app.get("/demo", response_class=HTMLResponse)
+def demo_home(db: Session = Depends(db_session)):
+    # Single-run demo: redirect to latest run, or create from hardcoded seeds.
+    r = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
+    if not r:
+        # create via hardcoded seeds
+        return RedirectResponse(url="/runs/new", status_code=303)
+    _ensure_demo_control(db, r.id)
+    return RedirectResponse(url=f"/runs/{r.id}/demo", status_code=303)
+
+
+@app.get("/runs/{run_id}/demo", response_class=HTMLResponse)
+def demo_run(request: Request, run_id: int, db: Session = Depends(db_session)):
+    r = db.get(Run, run_id)
+    if not r:
+        raise HTTPException(404, "run not found")
+    _ensure_demo_control(db, run_id)
+    return templates.TemplateResponse("demo.html", {"request": request, "run_id": run_id})
+
+
+@app.post("/runs/{run_id}/demo/start")
+def demo_start(run_id: int, db: Session = Depends(db_session)):
+    c = _ensure_demo_control(db, run_id)
+    c.state = "running"
+    db.commit()
+    db.add(DemoEvent(run_id=run_id, type=DemoEventType.RUN_STATE, data={"state": c.state, "serper_calls_used": c.serper_calls_used, "now": "Running"}))
+    db.commit()
+    return {"ok": True, "state": c.state}
+
+
+@app.post("/runs/{run_id}/demo/stop")
+def demo_stop(run_id: int, db: Session = Depends(db_session)):
+    c = _ensure_demo_control(db, run_id)
+    c.state = "stopped"
+    db.commit()
+    db.add(DemoEvent(run_id=run_id, type=DemoEventType.RUN_STATE, data={"state": c.state, "serper_calls_used": c.serper_calls_used, "now": "Stopped"}))
+    db.commit()
+    return {"ok": True, "state": c.state}
+
+
+@app.post("/runs/{run_id}/demo/reset")
+def demo_reset(run_id: int, db: Session = Depends(db_session)):
+    # Start a brand-new run using the hardcoded blocks flow.
+    return RedirectResponse(url="/runs/new", status_code=303)
+
+
+@app.get("/runs/{run_id}/events")
+async def demo_events(run_id: int, after_id: int = 0, db: Session = Depends(db_session)):
+    # SSE stream of demo events. We poll the DB for new rows.
+    _ensure_demo_control(db, run_id)
+
+    async def gen():
+        nonlocal after_id
+        from dealmatch.db.session import SessionLocal
+
+        # On connect, send an initial state.
+        db2 = SessionLocal()
+        try:
+            c = db2.get(DemoRunControl, run_id)
+            if c:
+                init = {"id": 0, "type": "RUN_STATE", "state": c.state, "serper_calls_used": c.serper_calls_used, "now": ""}
+                yield f"data: {json.dumps(init)}\n\n"
+        finally:
+            db2.close()
+
+        while True:
+            dbi = SessionLocal()
+            try:
+                rows = (
+                    dbi.execute(
+                        select(DemoEvent)
+                        .where(DemoEvent.run_id == run_id)
+                        .where(DemoEvent.id > after_id)
+                        .order_by(DemoEvent.id.asc())
+                        .limit(200)
+                    )
+                    .scalars()
+                    .all()
+                )
+                if rows:
+                    for ev in rows:
+                        after_id = max(after_id, ev.id)
+                        payload = {"id": ev.id, "type": ev.type.value}
+                        payload.update(ev.data or {})
+                        yield f"data: {json.dumps(payload)}\n\n"
+                await asyncio.sleep(0.35)
+            finally:
+                dbi.close()
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/runs/{run_id}/targets")

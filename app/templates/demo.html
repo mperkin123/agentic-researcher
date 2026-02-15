@@ -1,0 +1,284 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agentic Researcher – Demo Run {{ run_id }}</title>
+    <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; margin: 0; }
+      .topbar { display:flex; align-items:center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #e5e7eb; position: sticky; top: 0; background: white; z-index: 10; }
+      .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #f3f4f6; font-size: 12px; }
+      .btn { padding: 7px 10px; border-radius: 10px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; }
+      .btn-primary { background: #111827; color: white; border-color: #111827; }
+      .btn-danger { background: #b91c1c; color: white; border-color: #b91c1c; }
+      .layout { display:grid; grid-template-columns: 2.1fr 1fr; height: calc(100vh - 54px); }
+      .left { display:grid; grid-template-rows: 1fr 260px; min-width: 0; }
+      #graph { width: 100%; height: 100%; }
+      .panel { border-left: 1px solid #e5e7eb; padding: 12px; overflow: auto; }
+      .subgrid { display:grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+      .tile { border: 1px solid #e5e7eb; border-radius: 12px; padding: 8px; min-height: 86px; overflow: hidden; }
+      .tile h4 { margin: 0 0 6px 0; font-size: 12px; color: #111827; }
+      .tile .meta { font-size: 11px; color: #4b5563; }
+      .tile .q { font-size: 12px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .small { font-size: 12px; color: #374151; }
+      pre { white-space: pre-wrap; font-size: 12px; background: #f9fafb; padding: 8px; border-radius: 10px; border: 1px solid #eef2f7; }
+      a { color: #2563eb; }
+      .legend { display:flex; gap: 10px; align-items:center; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; display:inline-block; }
+      .dashed { border-top: 2px dashed #9ca3af; width: 18px; }
+      .solid { border-top: 2px solid #111827; width: 18px; }
+      .red { border-top: 2px solid #ef4444; width: 18px; }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <div><b>Agentic Researcher (Demo)</b> <span class="pill">Run #{{ run_id }}</span></div>
+      <div class="pill" id="statePill">state: …</div>
+      <div class="pill" id="budgetPill">Serper: … / 5000</div>
+      <button class="btn btn-primary" id="startBtn">Start</button>
+      <button class="btn btn-danger" id="stopBtn">Stop</button>
+      <button class="btn" id="resetBtn">Reset (new run)</button>
+      <div style="flex:1"></div>
+      <div class="legend small">
+        <span class="dashed"></span> Researching
+        <span class="solid"></span> Validated
+        <span class="red"></span> Rejected (brief)
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="left">
+        <div id="graph"></div>
+        <div style="border-top:1px solid #e5e7eb; padding: 10px 12px; overflow:auto;">
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div><b>Search wall</b> <span class="pill">10 lanes</span></div>
+            <div class="small" id="nowRunning">…</div>
+          </div>
+          <div class="subgrid" id="searchWall" style="margin-top:10px;"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 style="margin-top:0;">Details</h3>
+        <div class="small" id="selectionHint">Click a node to see evidence.</div>
+        <div id="details"></div>
+
+        <hr style="border:none; border-top:1px solid #e5e7eb; margin: 14px 0;" />
+        <h3>LLM Decisions</h3>
+        <div class="small">Newest first. Rejected edges fade out of the graph but remain logged here.</div>
+        <div id="decisions"></div>
+      </div>
+    </div>
+
+    <script>
+      const RUN_ID = {{ run_id }};
+
+      function el(tag, attrs={}, children=[]) {
+        const e = document.createElement(tag);
+        for (const [k,v] of Object.entries(attrs)) {
+          if (k === 'class') e.className = v;
+          else if (k === 'html') e.innerHTML = v;
+          else e.setAttribute(k, v);
+        }
+        for (const c of children) e.appendChild(c);
+        return e;
+      }
+
+      // vis-network setup
+      const nodes = new vis.DataSet();
+      const edges = new vis.DataSet();
+      const container = document.getElementById('graph');
+      const network = new vis.Network(container, { nodes, edges }, {
+        interaction: { hover: true },
+        physics: { stabilization: false, barnesHut: { springLength: 120 } },
+        nodes: { font: { face: 'ui-sans-serif', size: 14 } },
+        edges: { smooth: { type: 'dynamic' } }
+      });
+
+      const supplierColor = '#1f3a8a';
+      const partColor = '#b45309';
+
+      function nodeId(kind, key) { return kind + ':' + key; }
+
+      function upsertNode(kind, key, meta={}) {
+        const id = nodeId(kind, key);
+        if (nodes.get(id)) {
+          nodes.update({ id, ...meta });
+          return id;
+        }
+        const label = kind === 'supplier' ? key : key;
+        nodes.add({
+          id,
+          label,
+          shape: kind === 'supplier' ? 'dot' : 'box',
+          color: { background: kind === 'supplier' ? supplierColor : partColor, border: '#111827' },
+          font: { color: 'white' },
+          ...meta,
+        });
+        return id;
+      }
+
+      function edgeId(supplier, part, url) {
+        // allow multiple evidence edges; include url
+        return 'e:' + supplier + '::' + part + '::' + (url || '');
+      }
+
+      function styleForStatus(status) {
+        if (status === 'validated') {
+          return { dashes: false, color: { color: '#111827', opacity: 0.85 }, width: 2 };
+        }
+        if (status === 'rejected') {
+          return { dashes: [5,5], color: { color: '#ef4444', opacity: 0.65 }, width: 2 };
+        }
+        // researching
+        return { dashes: [6,6], color: { color: '#6b7280', opacity: 0.55 }, width: 1.5 };
+      }
+
+      function addOrUpdateEdge(supplier, part, url, snippet, status) {
+        const from = upsertNode('supplier', supplier);
+        const to = upsertNode('part', part);
+        const id = edgeId(supplier, part, url);
+        const st = styleForStatus(status);
+        const title = `<b>${supplier}</b> ↔ <b>${part}</b><br/>` +
+          `<span class='pill'>${status}</span><br/>` +
+          (url ? `<a target='_blank' href='${url}'>${url}</a><br/>` : '') +
+          (snippet ? `<div style='margin-top:6px; max-width: 420px;'>${snippet}</div>` : '');
+
+        const existing = edges.get(id);
+        const payload = { id, from, to, title, status, url, snippet, ...st };
+        if (existing) edges.update(payload); else edges.add(payload);
+
+        if (status === 'rejected') {
+          // fade out after 7s
+          setTimeout(() => { edges.remove(id); }, 7000);
+        }
+      }
+
+      // Search wall
+      const wall = document.getElementById('searchWall');
+      const lanes = new Map();
+      for (let i = 0; i < 10; i++) {
+        const t = el('div', { class: 'tile', id: `lane-${i}` }, [
+          el('h4', { html: `Lane ${i+1}` }),
+          el('div', { class: 'meta', id: `lane-meta-${i}`, html: 'idle' }),
+          el('div', { class: 'q', id: `lane-q-${i}`, html: '' }),
+        ]);
+        wall.appendChild(t);
+        lanes.set(i, { status: 'idle', query: '' });
+      }
+
+      function setLane(i, meta, q) {
+        const m = document.getElementById(`lane-meta-${i}`);
+        const qq = document.getElementById(`lane-q-${i}`);
+        m.textContent = meta;
+        qq.textContent = q || '';
+      }
+
+      // Details panel
+      const detailsEl = document.getElementById('details');
+      const decisionsEl = document.getElementById('decisions');
+
+      function addDecisionCard(d) {
+        const card = el('div', { class: 'tile', style: 'margin-bottom:10px;' }, [
+          el('h4', { html: d.title || 'Decision' }),
+          el('div', { class: 'meta', html: d.meta || '' }),
+          el('div', { class: 'small', html: d.body || '' }),
+        ]);
+        decisionsEl.prepend(card);
+        // limit
+        while (decisionsEl.children.length > 30) decisionsEl.removeChild(decisionsEl.lastChild);
+      }
+
+      network.on('click', function(params) {
+        if (!params.nodes || params.nodes.length === 0) return;
+        const id = params.nodes[0];
+        const [kind, key] = id.split(':', 2);
+        document.getElementById('selectionHint').textContent = '';
+        detailsEl.innerHTML = '';
+
+        // show connected edges evidence
+        const connected = network.getConnectedEdges(id);
+        const items = [];
+        for (const eid of connected) {
+          const e = edges.get(eid);
+          if (!e) continue;
+          const s = e.status || 'researching';
+          items.push({ status: s, url: e.url, snippet: e.snippet, title: e.title });
+        }
+        const h = document.createElement('div');
+        h.innerHTML = `<div class='pill'>${kind}</div> <b>${key}</b> <div class='small' style='margin-top:6px;'>Evidence (connected edges): ${items.length}</div>`;
+        detailsEl.appendChild(h);
+        for (const it of items.slice(0, 60)) {
+          const div = document.createElement('div');
+          div.style.marginTop = '10px';
+          div.innerHTML = `<div class='pill'>${it.status}</div> ` + (it.url ? `<a target='_blank' href='${it.url}'>${it.url}</a>` : '') + `<div class='small' style='margin-top:4px;'>${(it.snippet || '').slice(0, 260)}</div>`;
+          detailsEl.appendChild(div);
+        }
+      });
+
+      async function post(url) {
+        const r = await fetch(url, { method: 'POST' });
+        if (!r.ok) {
+          const t = await r.text();
+          alert('Request failed: ' + t);
+        }
+        return r;
+      }
+
+      document.getElementById('startBtn').onclick = async () => {
+        await post(`/runs/${RUN_ID}/demo/start`);
+      };
+
+      document.getElementById('stopBtn').onclick = async () => {
+        if (!confirm('Stop this demo run? It will remain saved and can be resumed.')) return;
+        await post(`/runs/${RUN_ID}/demo/stop`);
+      };
+
+      document.getElementById('resetBtn').onclick = async () => {
+        if (!confirm('Reset demo and start a NEW run? Old runs remain saved in the database.')) return;
+        const r = await post(`/runs/${RUN_ID}/demo/reset`);
+        if (r.redirected) window.location.href = r.url;
+        else window.location.href = '/demo';
+      };
+
+      // SSE
+      let lastId = 0;
+      function connect() {
+        const es = new EventSource(`/runs/${RUN_ID}/events?after_id=${lastId}`);
+        es.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.id) lastId = Math.max(lastId, msg.id);
+            if (msg.type === 'RUN_STATE') {
+              document.getElementById('statePill').textContent = `state: ${msg.state}`;
+              document.getElementById('budgetPill').textContent = `Serper: ${msg.serper_calls_used} / 5000`;
+              document.getElementById('nowRunning').textContent = msg.now || '';
+            }
+            if (msg.type === 'SERPER_LANE') {
+              setLane(msg.lane, msg.meta, msg.query);
+              document.getElementById('budgetPill').textContent = `Serper: ${msg.serper_calls_used} / 5000`;
+            }
+            if (msg.type === 'EDGE') {
+              addOrUpdateEdge(msg.supplier, msg.part, msg.url, msg.snippet, msg.status);
+            }
+            if (msg.type === 'DECISION') {
+              addDecisionCard({
+                title: msg.title,
+                meta: msg.meta,
+                body: msg.body,
+              });
+            }
+          } catch (e) {
+            console.warn('bad event', e, evt.data);
+          }
+        };
+        es.onerror = () => {
+          es.close();
+          setTimeout(connect, 800);
+        };
+      }
+      connect();
+    </script>
+  </body>
+</html>
