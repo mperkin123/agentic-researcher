@@ -592,59 +592,105 @@ async def seed_researching_edges(run_id: int):
 async def run_demo_loop():
     print("demo worker: starting", flush=True)
 
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                db = SessionLocal()
+                try:
+                    ctl = db.execute(
+                        select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)
+                    ).scalar_one_or_none()
+                    rid = int(ctl.run_id) if ctl else 0
+                    if rid:
+                        c = db.get(DemoRunControl, rid)
+                        emit(db, run_id=rid, type=DemoEventType.RUN_STATE, data={
+                            "state": c.state if c else "unknown",
+                            "serper_calls_used": int((c.serper_calls_used if c else 0)),
+                            "now": "worker heartbeat",
+                        })
+                finally:
+                    db.close()
+            except Exception as e:
+                print(f"demo worker: heartbeat error {e!r}", flush=True)
+
+    hb_task = asyncio.create_task(heartbeat())
+
     # Single-run demo: prefer the newest run that is explicitly marked running.
     while True:
-        db = SessionLocal()
         try:
-            # Find newest running demo control.
-            running_ctl = db.execute(
-                select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)
-            ).scalar_one_or_none()
-            if running_ctl:
-                run = db.get(Run, running_ctl.run_id)
-            else:
-                run = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
-            if not run:
-                await asyncio.sleep(1.0)
-                continue
-            ensure_control(db, run.id)
-            await ensure_parts(db, run)
-            run_id = run.id
-        finally:
-            db.close()
-
-        # Spawn loops for this run
-        serp_sem = asyncio.Semaphore(SERPER_CONCURRENCY)
-        qual_sem = asyncio.Semaphore(int(os.getenv("DEMO_SUPPLIER_QUAL_CONCURRENCY", "12")))
-        scr_sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
-
-        tasks = []
-        for lane in range(SERPER_CONCURRENCY):
-            tasks.append(asyncio.create_task(serper_worker(run_id, lane=lane, sem=serp_sem)))
-        tasks.append(asyncio.create_task(supplier_qualifier_loop(run_id, sem=qual_sem)))
-        for _ in range(SCRAPE_CONCURRENCY):
-            tasks.append(asyncio.create_task(scraper_loop(run_id, sem=scr_sem)))
-        tasks.append(asyncio.create_task(seed_researching_edges(run_id)))
-
-        # Keep running; if a different run becomes active (newer running control), restart loops.
-        last_run_id = run_id
-        while True:
-            await asyncio.sleep(1.0)
             db = SessionLocal()
             try:
+                # Find newest running demo control.
                 running_ctl = db.execute(
-                    select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)
+                    select(DemoRunControl)
+                    .where(DemoRunControl.state == "running")
+                    .order_by(DemoRunControl.run_id.desc())
+                    .limit(1)
                 ).scalar_one_or_none()
-                active = running_ctl.run_id if running_ctl else db.execute(select(Run.id).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
-                if active and active != last_run_id:
-                    print(f"demo worker: active run changed {last_run_id} -> {active}, restarting loops", flush=True)
-                    break
+                if running_ctl:
+                    run = db.get(Run, running_ctl.run_id)
+                else:
+                    run = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
+                if not run:
+                    await asyncio.sleep(1.0)
+                    continue
+                ensure_control(db, run.id)
+                await ensure_parts(db, run)
+                run_id = int(run.id)
+                print(f"demo worker: attached run_id={run_id}", flush=True)
+                emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                    "title": "Worker attached",
+                    "meta": f"run_id={run_id}",
+                    "body": f"serper_concurrency={SERPER_CONCURRENCY} scrape_concurrency={SCRAPE_CONCURRENCY}",
+                })
             finally:
                 db.close()
 
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+            # Spawn loops for this run
+            serp_sem = asyncio.Semaphore(SERPER_CONCURRENCY)
+            qual_sem = asyncio.Semaphore(int(os.getenv("DEMO_SUPPLIER_QUAL_CONCURRENCY", "12")))
+            scr_sem = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+
+            tasks = []
+            for lane in range(SERPER_CONCURRENCY):
+                tasks.append(asyncio.create_task(serper_worker(run_id, lane=lane, sem=serp_sem)))
+            tasks.append(asyncio.create_task(supplier_qualifier_loop(run_id, sem=qual_sem)))
+            for _ in range(SCRAPE_CONCURRENCY):
+                tasks.append(asyncio.create_task(scraper_loop(run_id, sem=scr_sem)))
+            tasks.append(asyncio.create_task(seed_researching_edges(run_id)))
+
+            # Keep running; if a different run becomes active (newer running control), restart loops.
+            last_run_id = run_id
+            while True:
+                await asyncio.sleep(1.0)
+                db = SessionLocal()
+                try:
+                    running_ctl = db.execute(
+                        select(DemoRunControl)
+                        .where(DemoRunControl.state == "running")
+                        .order_by(DemoRunControl.run_id.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    active = (
+                        int(running_ctl.run_id)
+                        if running_ctl
+                        else int(db.execute(select(Run.id).order_by(Run.id.desc()).limit(1)).scalar_one_or_none() or 0)
+                    )
+                    if active and active != last_run_id:
+                        print(f"demo worker: active run changed {last_run_id} -> {active}, restarting loops", flush=True)
+                        break
+                finally:
+                    db.close()
+
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            import traceback
+
+            print(f"demo worker: FATAL loop error {e!r}\n{traceback.format_exc()}", flush=True)
+            await asyncio.sleep(1.0)
 
 
 if __name__ == "__main__":
