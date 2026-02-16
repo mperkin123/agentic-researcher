@@ -528,7 +528,9 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                                         run_id=run_id,
                                         supplier_domain=d,
                                         part_token=part_tok,
-                                        evidence_url=None,
+                                        # evidence_url is non-nullable in the DB schema; use empty string for
+                                        # "discovered" edges that don't have a specific evidence URL yet.
+                                        evidence_url="",
                                         evidence_snippet="Discovered via search; qualifying supplier…",
                                         status=DemoEdgeStatus.researching,
                                     )
@@ -537,7 +539,7 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                                 emit(db, run_id=run_id, type=DemoEventType.EDGE, data={
                                     "supplier": d,
                                     "part": part_tok,
-                                    "url": None,
+                                    "url": "",
                                     "snippet": "Discovered via search; qualifying supplier…",
                                     "status": DemoEdgeStatus.researching.value,
                                 })
