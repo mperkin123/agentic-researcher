@@ -123,7 +123,6 @@ def extract_part_from_query(q: str) -> str | None:
 JUNK_DOMAIN_SUBSTR = [
     "archive.org",
     "amazonaws.com",
-    "s3.",
     "pdfcoffee.",
     "yumpu.",
     "federalregister.",
@@ -138,6 +137,12 @@ JUNK_DOMAIN_SUBSTR = [
 
 
 def is_junk_domain(d: str) -> bool:
+    """Heuristic junk filter.
+
+    Can be disabled with DEMO_DISABLE_JUNK_FILTER=1.
+    """
+    if os.getenv("DEMO_DISABLE_JUNK_FILTER", "").strip() in ("1", "true", "yes", "on"):
+        return False
     dd = (d or "").lower().strip()
     if not dd:
         return True
@@ -449,20 +454,37 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
 
                     # Extract supplier domains from serper results
                     org = (res.get("organic") or []) if isinstance(res, dict) else []
-                    domains = []
+                    domains_all: list[str] = []
                     for r in org:
                         link = (r.get("link") or "")
                         d = domain_only(link)
-                        if d and not is_junk_domain(d):
-                            domains.append(d)
-                    # unique
-                    seen = set(); domains = [d for d in domains if not (d in seen or seen.add(d))]
+                        if d:
+                            domains_all.append(d)
+
+                    # unique preserve order
+                    seen = set(); domains_all = [d for d in domains_all if not (d in seen or seen.add(d))]
+
+                    domains_kept = [d for d in domains_all if not is_junk_domain(d)]
 
                     # tie discoveries to the part token that drove this query (best-effort)
                     part_tok = extract_part_from_query(q.query)
 
+                    # Debug visibility: show what Serper gave us and what we kept.
+                    if not domains_all:
+                        emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                            "title": "Serper results: no domains",
+                            "meta": f"lane={lane} organic={len(org)}",
+                            "body": q.query,
+                        })
+                    elif not domains_kept:
+                        emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                            "title": "Serper results: all domains filtered",
+                            "meta": f"lane={lane} total={len(domains_all)}",
+                            "body": str(domains_all[:10]),
+                        })
+
                     added = 0
-                    for d in domains[:MAX_SUPPLIERS_PER_QUERY]:
+                    for d in domains_kept[:MAX_SUPPLIERS_PER_QUERY]:
                         ex = db.execute(
                             select(DemoSupplier).where(DemoSupplier.run_id == run_id, DemoSupplier.domain == d)
                         ).scalar_one_or_none()
