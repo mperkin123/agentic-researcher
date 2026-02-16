@@ -286,6 +286,49 @@ def _ensure_demo_control(db: Session, run_id: int) -> DemoRunControl:
     return c
 
 
+def _ensure_demo_parts_seeded(db: Session, run_id: int) -> int:
+    """Ensure DemoPart rows exist for this run.
+
+    This makes the demo robust even if the worker hasn't attached yet.
+    Returns number of parts inserted.
+    """
+    from sqlalchemy import select
+
+    existing = db.execute(select(func.count()).select_from(DemoPart).where(DemoPart.run_id == run_id)).scalar() or 0
+    if int(existing) > 0:
+        return 0
+
+    r = db.get(Run, run_id)
+    if not r:
+        return 0
+
+    toks: list[str] = []
+    for _seed, parts in (r.seed_phrases or {}).items():
+        for p in parts or []:
+            t = (p or "").strip()
+            if t:
+                toks.append(t)
+
+    # dedupe (case-insensitive)
+    seen = set()
+    deduped: list[str] = []
+    for t in toks:
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        deduped.append(t)
+
+    added = 0
+    for t in deduped[:5000]:
+        db.add(DemoPart(run_id=run_id, token=t, status=DemoPartStatus.validated, confidence=0.8, reason="seed"))
+        added += 1
+
+    if added:
+        db.commit()
+    return added
+
+
 @app.get("/demo", response_class=HTMLResponse)
 def demo_home(db: Session = Depends(db_session)):
     # Single-run demo: redirect to newest running run if any, else latest run.
@@ -317,6 +360,17 @@ def demo_run(request: Request, run_id: int, db: Session = Depends(db_session)):
 @app.post("/runs/{run_id}/demo/start")
 def demo_start(run_id: int, db: Session = Depends(db_session)):
     c = _ensure_demo_control(db, run_id)
+
+    # Ensure parts exist for demo.
+    seeded = _ensure_demo_parts_seeded(db, run_id)
+    if seeded:
+        db.add(DemoEvent(run_id=run_id, type=DemoEventType.DECISION, data={
+            "title": "Seeded parts",
+            "meta": f"added={seeded}",
+            "body": "Seeded DemoPart rows from run.seed_phrases",
+        }))
+        db.commit()
+
     c.state = "running"
     db.commit()
     db.add(
