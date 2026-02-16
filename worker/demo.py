@@ -54,10 +54,33 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+# Simple per-process throttles/caches to reduce SSE spam.
+_LAST_RUN_STATE_EMIT: dict[int, float] = {}
+
+
 def emit(db: Session, *, run_id: int, type: DemoEventType, data: dict):
     ev = DemoEvent(run_id=run_id, type=type, data=data)
     db.add(ev)
     db.commit()
+
+
+def emit_run_state_throttled(db: Session, *, run_id: int, state: str, serper_calls_used: int, now: str, min_interval_s: float = 5.0):
+    """Emit RUN_STATE at most once per min_interval_s per run.
+
+    The UI doesn't need per-Serper-call precision and too many SSE messages can
+    overwhelm the frontend.
+    """
+    t = time.time()
+    last = float(_LAST_RUN_STATE_EMIT.get(int(run_id), 0.0))
+    if (t - last) < float(min_interval_s):
+        return
+    _LAST_RUN_STATE_EMIT[int(run_id)] = t
+    emit(
+        db,
+        run_id=run_id,
+        type=DemoEventType.RUN_STATE,
+        data={"state": state, "serper_calls_used": int(serper_calls_used), "now": now},
+    )
 
 
 def ensure_control(db: Session, run_id: int) -> DemoRunControl:
@@ -353,11 +376,14 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                         "query": q.query,
                         "serper_calls_used": ctl.serper_calls_used,
                     })
-                    emit(db, run_id=run_id, type=DemoEventType.RUN_STATE, data={
-                        "state": ctl.state,
-                        "serper_calls_used": ctl.serper_calls_used,
-                        "now": f"Serper lane {lane+1}: {q.query}",
-                    })
+                    emit_run_state_throttled(
+                        db,
+                        run_id=run_id,
+                        state=ctl.state,
+                        serper_calls_used=ctl.serper_calls_used,
+                        now=f"Serper lane {lane+1}: {q.query}",
+                        min_interval_s=5.0,
+                    )
 
                     # slow down a touch so the UI is readable
                     await asyncio.sleep(SERPER_LANE_DELAY_S)
@@ -521,26 +547,34 @@ async def scraper_loop(run_id: int, sem: asyncio.Semaphore):
 
                 for part, idx in hits:
                     snip = snippet_around(text, idx)
+
+                    # Deduplicate by (supplier, part) rather than (supplier, part, url).
+                    # This keeps the demo UI fast and reduces SSE events dramatically.
+                    already = (
+                        db.execute(
+                            select(DemoEdge.id)
+                            .where(DemoEdge.run_id == run_id)
+                            .where(DemoEdge.supplier_domain == sup.domain)
+                            .where(DemoEdge.part_token == part)
+                            .limit(1)
+                        ).scalar_one_or_none()
+                        is not None
+                    )
+                    if already:
+                        continue
+
                     # Insert edge as validated (supplier already qualified; parts are validated)
                     st = DemoEdgeStatus.validated
-                    eid = None
-                    ex = db.execute(
-                        select(DemoEdge)
-                        .where(DemoEdge.run_id == run_id)
-                        .where(DemoEdge.supplier_domain == sup.domain)
-                        .where(DemoEdge.part_token == part)
-                        .where(DemoEdge.evidence_url == url)
-                    ).scalar_one_or_none()
-                    if ex:
-                        continue
-                    db.add(DemoEdge(
-                        run_id=run_id,
-                        supplier_domain=sup.domain,
-                        part_token=part,
-                        evidence_url=url,
-                        evidence_snippet=snip[:280],
-                        status=st,
-                    ))
+                    db.add(
+                        DemoEdge(
+                            run_id=run_id,
+                            supplier_domain=sup.domain,
+                            part_token=part,
+                            evidence_url=url,
+                            evidence_snippet=snip[:280],
+                            status=st,
+                        )
+                    )
                     db.commit()
 
                     emit(db, run_id=run_id, type=DemoEventType.EDGE, data={
@@ -577,13 +611,27 @@ async def seed_researching_edges(run_id: int):
 
             url = f"https://{sup.domain}/"
             status = DemoEdgeStatus.researching
-            emit(db, run_id=run_id, type=DemoEventType.EDGE, data={
-                "supplier": sup.domain,
-                "part": part.token,
-                "url": url,
-                "snippet": "Researching this relationship…",
-                "status": status.value,
-            })
+
+            # Don't spam: only emit a researching edge if we don't already have
+            # any edge for this supplier+part.
+            exists_any = (
+                db.execute(
+                    select(DemoEdge.id)
+                    .where(DemoEdge.run_id == run_id)
+                    .where(DemoEdge.supplier_domain == sup.domain)
+                    .where(DemoEdge.part_token == part.token)
+                    .limit(1)
+                ).scalar_one_or_none()
+                is not None
+            )
+            if not exists_any:
+                emit(db, run_id=run_id, type=DemoEventType.EDGE, data={
+                    "supplier": sup.domain,
+                    "part": part.token,
+                    "url": url,
+                    "snippet": "Researching this relationship…",
+                    "status": status.value,
+                })
         finally:
             db.close()
 
