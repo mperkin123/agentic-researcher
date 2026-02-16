@@ -711,7 +711,33 @@ async def run_demo_loop():
         except Exception as e:
             import traceback
 
-            print(f"demo worker: FATAL loop error {e!r}\n{traceback.format_exc()}", flush=True)
+            tb = traceback.format_exc()
+            print(f"demo worker: FATAL loop error {e!r}\n{tb}", flush=True)
+
+            # Also surface this in the demo UI (DB-backed) so we aren't blind on Render.
+            try:
+                db = SessionLocal()
+                try:
+                    ctl = db.execute(
+                        select(DemoRunControl).where(DemoRunControl.state == "running").order_by(DemoRunControl.run_id.desc()).limit(1)
+                    ).scalar_one_or_none()
+                    rid = int(ctl.run_id) if ctl else 0
+                    if rid:
+                        emit(
+                            db,
+                            run_id=rid,
+                            type=DemoEventType.DECISION,
+                            data={
+                                "title": "Worker fatal error",
+                                "meta": "auto-retrying",
+                                "body": (repr(e) + "\n" + tb)[:1800],
+                            },
+                        )
+                finally:
+                    db.close()
+            except Exception:
+                pass
+
             await asyncio.sleep(1.0)
 
 

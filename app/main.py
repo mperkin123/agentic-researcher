@@ -332,6 +332,87 @@ def _ensure_demo_parts_seeded(db: Session, run_id: int) -> int:
     return added
 
 
+def _demo_prime_queries(db: Session, run_id: int, backlog_target: int = 80) -> int:
+    """Seed DemoSerperQuery backlog from validated DemoPart tokens.
+
+    We do this in the web app so the demo UI can become lively even if the
+    background demo worker hasn't attached yet (or its Serper lanes crashed).
+
+    Returns number of queries inserted.
+    """
+
+    from sqlalchemy import select
+
+    # How many pending already?
+    pending_n = (
+        db.execute(
+            select(func.count())
+            .select_from(DemoSerperQuery)
+            .where(DemoSerperQuery.run_id == run_id)
+            .where(DemoSerperQuery.status == DemoSerperQueryStatus.pending)
+        ).scalar()
+        or 0
+    )
+    if int(pending_n) >= int(backlog_target):
+        return 0
+
+    need = max(0, int(backlog_target) - int(pending_n))
+    if need <= 0:
+        return 0
+
+    # sample validated parts
+    parts = (
+        db.execute(
+            select(DemoPart.token)
+            .where(DemoPart.run_id == run_id)
+            .where(DemoPart.status == DemoPartStatus.validated)
+            .limit(800)
+        )
+        .scalars()
+        .all()
+    )
+
+    # generate basic queries
+    qs: list[str] = []
+    for t in parts[: min(len(parts), max(20, need // 2))]:
+        tt = (t or "").strip()
+        if not tt:
+            continue
+        qs.append(f'"{tt}" aircraft parts supplier')
+        qs.append(f'"{tt}" inventory "Request a Quote"')
+
+    # include a few competitor-style queries from seeds
+    r = db.get(Run, run_id)
+    if r:
+        for sd in (r.seed_domains or [])[:3]:
+            if sd:
+                qs.append(f"{sd} competitors aircraft parts")
+
+    added = 0
+    for q in qs:
+        if added >= need:
+            break
+        # Avoid duplicates that are in-flight (pending/running)
+        in_flight = (
+            db.execute(
+                select(DemoSerperQuery)
+                .where(DemoSerperQuery.run_id == run_id)
+                .where(DemoSerperQuery.query == q)
+                .where(DemoSerperQuery.status.in_([DemoSerperQueryStatus.pending, DemoSerperQueryStatus.running]))
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
+        if in_flight:
+            continue
+        db.add(DemoSerperQuery(run_id=run_id, query=q, status=DemoSerperQueryStatus.pending))
+        added += 1
+
+    if added:
+        db.commit()
+    return added
+
+
 @app.get("/demo", response_class=HTMLResponse)
 def demo_home(db: Session = Depends(db_session)):
     # Single-run demo: redirect to newest running run if any, else latest run.
@@ -375,11 +456,35 @@ def demo_start(run_id: int, db: Session = Depends(db_session)):
     # Ensure parts exist for demo.
     seeded = _ensure_demo_parts_seeded(db, run_id)
     if seeded:
-        db.add(DemoEvent(run_id=run_id, type=DemoEventType.DECISION, data={
-            "title": "Seeded parts",
-            "meta": f"added={seeded}",
-            "body": "Seeded DemoPart rows from run.seed_phrases",
-        }))
+        db.add(
+            DemoEvent(
+                run_id=run_id,
+                type=DemoEventType.DECISION,
+                data={
+                    "title": "Seeded parts",
+                    "meta": f"added={seeded}",
+                    "body": "Seeded DemoPart rows from run.seed_phrases",
+                },
+            )
+        )
+        db.commit()
+
+    # Prime some pending queries so the UI has immediate motion, even if the
+    # background demo worker isn't attached yet.
+    backlog = int(os.getenv("DEMO_QUERY_BACKLOG_TARGET", "80"))
+    primed = _demo_prime_queries(db, run_id, backlog_target=backlog)
+    if primed:
+        db.add(
+            DemoEvent(
+                run_id=run_id,
+                type=DemoEventType.DECISION,
+                data={
+                    "title": "Primed Serper queries",
+                    "meta": f"added={primed} pending_target={backlog}",
+                    "body": "Inserted DemoSerperQuery backlog (pending)",
+                },
+            )
+        )
         db.commit()
 
     c.state = "running"
@@ -392,7 +497,7 @@ def demo_start(run_id: int, db: Session = Depends(db_session)):
         )
     )
     db.commit()
-    return {"ok": True, "state": c.state}
+    return {"ok": True, "state": c.state, "primed_queries": primed}
 
 
 @app.get("/runs/{run_id}/demo/control")
