@@ -493,6 +493,12 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                             "meta": f"lane={lane} total={len(domains_all)}",
                             "body": str(domains_all[:10]),
                         })
+                    else:
+                        emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
+                            "title": "Serper domains extracted",
+                            "meta": f"lane={lane} organic={len(org)} total={len(domains_all)} kept={len(domains_kept)}",
+                            "body": str(domains_kept[:10]),
+                        })
 
                     added = 0
                     for d in domains_kept[:MAX_SUPPLIERS_PER_QUERY]:
