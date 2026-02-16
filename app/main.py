@@ -448,6 +448,18 @@ def demo_run(request: Request, run_id: int, db: Session = Depends(db_session)):
 
 @app.post("/runs/{run_id}/demo/start")
 def demo_start(run_id: int, db: Session = Depends(db_session)):
+    # Enforce single-active demo: stop every other demo run.
+    # This prevents multiple runs burning Serper budget in parallel.
+    others = (
+        db.execute(select(DemoRunControl).where(DemoRunControl.run_id != run_id).where(DemoRunControl.state == "running"))
+        .scalars()
+        .all()
+    )
+    for o in others:
+        o.state = "stopped"
+    if others:
+        db.commit()
+
     c = _ensure_demo_control(db, run_id)
 
     # If env budget changed, keep control row in sync for new demos.
