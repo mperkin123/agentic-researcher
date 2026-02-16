@@ -372,21 +372,26 @@ def _demo_prime_queries(db: Session, run_id: int, backlog_target: int = 80) -> i
         .all()
     )
 
-    # generate basic queries
+    # generate broader queries (match worker/demo.py behavior)
     qs: list[str] = []
-    for t in parts[: min(len(parts), max(20, need // 2))]:
+    sample = parts[: min(len(parts), max(20, need // 4))]
+    for t in sample:
         tt = (t or "").strip()
         if not tt:
             continue
-        qs.append(f'"{tt}" aircraft parts supplier')
-        qs.append(f'"{tt}" inventory "Request a Quote"')
+        qs.append(f'"{tt}" aircraft parts')
+        qs.append(f'"{tt}" aviation')
+        qs.append(f'"{tt}" supplier')
+        qs.append(f'"{tt}" distributor')
+        qs.append(f'"{tt}" "Request a Quote"')
 
     # include a few competitor-style queries from seeds
     r = db.get(Run, run_id)
     if r:
         for sd in (r.seed_domains or [])[:3]:
             if sd:
-                qs.append(f"{sd} competitors aircraft parts")
+                qs.append(f"{sd} competitors")
+                qs.append(f"{sd} aircraft parts")
 
     added = 0
     for q in qs:
