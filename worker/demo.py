@@ -35,11 +35,17 @@ SERPER_BUDGET = int(os.getenv("DEMO_SERPER_BUDGET", "2000"))
 SERPER_CONCURRENCY = int(os.getenv("DEMO_SERPER_CONCURRENCY", "5"))
 SCRAPE_CONCURRENCY = int(os.getenv("DEMO_SCRAPE_CONCURRENCY", "20"))
 
+# Global slow-motion factor. 1.0 = normal, 1.7 ~= 70% slower.
+SLOW_FACTOR = float(os.getenv("DEMO_SLOW_FACTOR", "1.7"))
+
 # Keep the dashboard "alive" by maintaining a backlog of pending queries.
 QUERY_BACKLOG_TARGET = int(os.getenv("DEMO_QUERY_BACKLOG_TARGET", "80"))
 
+# Limit concurrent unqualified suppliers so we qualify as we go.
+MAX_UNQUALIFIED_SUPPLIERS = int(os.getenv("DEMO_MAX_UNQUALIFIED_SUPPLIERS", "10"))
+
 # Slow down the visible SERP wall a bit (per lane, between queries).
-SERPER_LANE_DELAY_S = float(os.getenv("DEMO_SERPER_LANE_DELAY_S", "0.35"))
+SERPER_LANE_DELAY_S = float(os.getenv("DEMO_SERPER_LANE_DELAY_S", "0.35")) * SLOW_FACTOR
 
 MAX_SUPPLIERS_PER_QUERY = int(os.getenv("DEMO_MAX_SUPPLIERS_PER_QUERY", "12"))
 MAX_PAGES_PER_SUPPLIER = int(os.getenv("DEMO_MAX_PAGES_PER_SUPPLIER", "3"))
@@ -97,6 +103,45 @@ def normalize_part(tok: str) -> str:
     t = (tok or "").strip()
     t = t.replace("\u00a0", " ")
     return t
+
+
+def extract_part_from_query(q: str) -> str | None:
+    """Best-effort extract a part token from the demo query string.
+
+    Our queries are often like: "{PART}" aircraft parts supplier
+    """
+    import re
+
+    s = (q or "").strip()
+    m = re.search(r"\"([^\"]{2,80})\"", s)
+    if not m:
+        return None
+    tok = m.group(1).strip()
+    return tok or None
+
+
+JUNK_DOMAIN_SUBSTR = [
+    "archive.org",
+    "amazonaws.com",
+    "s3.",
+    "pdfcoffee.",
+    "yumpu.",
+    "federalregister.",
+    "researchgate.",
+    "slideshare.",
+    "scribd.",
+    "github.",
+    "linkedin.",
+    "facebook.",
+    "wikipedia.",
+]
+
+
+def is_junk_domain(d: str) -> bool:
+    dd = (d or "").lower().strip()
+    if not dd:
+        return True
+    return any(sub in dd for sub in JUNK_DOMAIN_SUBSTR)
 
 
 def part_uncertain(tok: str) -> bool:
@@ -327,6 +372,20 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                         await asyncio.sleep(0.9)
                         continue
 
+                    # If we already have a backlog of unqualified suppliers, pause discovery.
+                    unq = int(
+                        db.execute(
+                            select(func.count())
+                            .select_from(DemoSupplier)
+                            .where(DemoSupplier.run_id == run_id)
+                            .where(DemoSupplier.status.in_([DemoSupplierStatus.discovered, DemoSupplierStatus.qualifying]))
+                        ).scalar()
+                        or 0
+                    )
+                    if unq >= MAX_UNQUALIFIED_SUPPLIERS:
+                        await asyncio.sleep(0.8 * SLOW_FACTOR)
+                        continue
+
                     # keep queries stocked
                     await generate_queries(db, run)
 
@@ -394,10 +453,13 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                     for r in org:
                         link = (r.get("link") or "")
                         d = domain_only(link)
-                        if d:
+                        if d and not is_junk_domain(d):
                             domains.append(d)
                     # unique
                     seen = set(); domains = [d for d in domains if not (d in seen or seen.add(d))]
+
+                    # tie discoveries to the part token that drove this query (best-effort)
+                    part_tok = extract_part_from_query(q.query)
 
                     added = 0
                     for d in domains[:MAX_SUPPLIERS_PER_QUERY]:
@@ -408,6 +470,39 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                             continue
                         db.add(DemoSupplier(run_id=run_id, domain=d, status=DemoSupplierStatus.discovered, source_query_id=q.id))
                         added += 1
+
+                        # Create a *single* researching edge per supplier+part so the UI has immediate feedback.
+                        if part_tok:
+                            edge_exists = (
+                                db.execute(
+                                    select(DemoEdge.id)
+                                    .where(DemoEdge.run_id == run_id)
+                                    .where(DemoEdge.supplier_domain == d)
+                                    .where(DemoEdge.part_token == part_tok)
+                                    .limit(1)
+                                ).scalar_one_or_none()
+                                is not None
+                            )
+                            if not edge_exists:
+                                db.add(
+                                    DemoEdge(
+                                        run_id=run_id,
+                                        supplier_domain=d,
+                                        part_token=part_tok,
+                                        evidence_url=None,
+                                        evidence_snippet="Discovered via search; qualifying supplier…",
+                                        status=DemoEdgeStatus.researching,
+                                    )
+                                )
+                                db.commit()
+                                emit(db, run_id=run_id, type=DemoEventType.EDGE, data={
+                                    "supplier": d,
+                                    "part": part_tok,
+                                    "url": None,
+                                    "snippet": "Discovered via search; qualifying supplier…",
+                                    "status": DemoEdgeStatus.researching.value,
+                                })
+
                     db.commit()
                 except Exception as e:
                     emit(db, run_id=run_id, type=DemoEventType.DECISION, data={
@@ -491,9 +586,37 @@ async def supplier_qualifier_loop(run_id: int, sem: asyncio.Semaphore):
                     "meta": f"{s.domain} (conf={conf:.2f})",
                     "body": reason,
                 })
+
+                # Flip any researching edges for this supplier to validated/rejected.
+                new_edge_status = DemoEdgeStatus.validated if ok else DemoEdgeStatus.rejected
+                rows = (
+                    db.execute(
+                        select(DemoEdge)
+                        .where(DemoEdge.run_id == run_id)
+                        .where(DemoEdge.supplier_domain == s.domain)
+                        .where(DemoEdge.status == DemoEdgeStatus.researching)
+                        .limit(200)
+                    )
+                    .scalars()
+                    .all()
+                )
+                for e in rows:
+                    e.status = new_edge_status
+                    # Keep some evidence (domain-level qualification)
+                    if not e.evidence_snippet:
+                        e.evidence_snippet = reason[:280]
+                db.commit()
+                for e in rows:
+                    emit(db, run_id=run_id, type=DemoEventType.EDGE, data={
+                        "supplier": e.supplier_domain,
+                        "part": e.part_token,
+                        "url": e.evidence_url,
+                        "snippet": (e.evidence_snippet or reason)[:280],
+                        "status": new_edge_status.value,
+                    })
             finally:
                 db.close()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05 * SLOW_FACTOR)
 
 
 async def scraper_loop(run_id: int, sem: asyncio.Semaphore):
@@ -587,7 +710,7 @@ async def scraper_loop(run_id: int, sem: asyncio.Semaphore):
 
             finally:
                 db.close()
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.03 * SLOW_FACTOR)
 
 
 async def seed_researching_edges(run_id: int):
@@ -596,7 +719,7 @@ async def seed_researching_edges(run_id: int):
     These come from discovered suppliers before qualification, and then flip later.
     """
     while True:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0 * SLOW_FACTOR)
         db = SessionLocal()
         try:
             ctl = ensure_control(db, run_id)
@@ -680,7 +803,7 @@ async def run_demo_loop():
                 else:
                     run = db.execute(select(Run).order_by(Run.id.desc()).limit(1)).scalar_one_or_none()
                 if not run:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0 * SLOW_FACTOR)
                     continue
                 ensure_control(db, run.id)
                 await ensure_parts(db, run)
@@ -733,7 +856,7 @@ async def run_demo_loop():
             # Keep running; if a different run becomes active (newer running control), restart loops.
             last_run_id = run_id
             while True:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(1.0 * SLOW_FACTOR)
                 db = SessionLocal()
                 try:
                     running_ctl = db.execute(
@@ -786,7 +909,7 @@ async def run_demo_loop():
             except Exception:
                 pass
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.0 * SLOW_FACTOR)
 
 
 if __name__ == "__main__":
