@@ -30,9 +30,17 @@ from dealmatch.core.models import (
 )
 
 
-SERPER_BUDGET = int(os.getenv("DEMO_SERPER_BUDGET", "5000"))
-SERPER_CONCURRENCY = int(os.getenv("DEMO_SERPER_CONCURRENCY", "10"))
-SCRAPE_CONCURRENCY = int(os.getenv("DEMO_SCRAPE_CONCURRENCY", "40"))
+# Demo pacing + budget
+SERPER_BUDGET = int(os.getenv("DEMO_SERPER_BUDGET", "2000"))
+SERPER_CONCURRENCY = int(os.getenv("DEMO_SERPER_CONCURRENCY", "5"))
+SCRAPE_CONCURRENCY = int(os.getenv("DEMO_SCRAPE_CONCURRENCY", "20"))
+
+# Keep the dashboard "alive" by maintaining a backlog of pending queries.
+QUERY_BACKLOG_TARGET = int(os.getenv("DEMO_QUERY_BACKLOG_TARGET", "80"))
+
+# Slow down the visible SERP wall a bit (per lane, between queries).
+SERPER_LANE_DELAY_S = float(os.getenv("DEMO_SERPER_LANE_DELAY_S", "0.35"))
+
 MAX_SUPPLIERS_PER_QUERY = int(os.getenv("DEMO_MAX_SUPPLIERS_PER_QUERY", "12"))
 MAX_PAGES_PER_SUPPLIER = int(os.getenv("DEMO_MAX_PAGES_PER_SUPPLIER", "3"))
 
@@ -196,58 +204,78 @@ async def ensure_parts(db: Session, run: Run):
     db.commit()
 
 
-async def generate_queries(db: Session, run: Run, target_n: int = 120):
-    """Ensure we have pending Serper queries.
+async def generate_queries(db: Session, run: Run):
+    """Maintain a backlog of pending Serper queries.
 
-    Uses LLM when available, but always falls back to simple templated queries so the demo keeps moving.
+    Important demo behavior: we *allow re-running* previously-done queries if needed.
+    We only avoid duplicating queries that are currently pending/running.
     """
 
-    pending = db.execute(
-        select(DemoSerperQuery).where(
-            DemoSerperQuery.run_id == run.id,
-            DemoSerperQuery.status == DemoSerperQueryStatus.pending,
-        )
-    ).scalars().all()
-    if len(pending) >= 30:
+    pending_n = int(
+        db.execute(
+            select(func.count())
+            .select_from(DemoSerperQuery)
+            .where(DemoSerperQuery.run_id == run.id)
+            .where(DemoSerperQuery.status == DemoSerperQueryStatus.pending)
+        ).scalar()
+        or 0
+    )
+    if pending_n >= QUERY_BACKLOG_TARGET:
         return
 
-    # sample some parts to drive queries
-    parts = db.execute(
-        select(DemoPart.token)
-        .where(DemoPart.run_id == run.id, DemoPart.status == DemoPartStatus.validated)
-        .limit(200)
-    ).scalars().all()
-    sample = random.sample(parts, k=min(len(parts), 25)) if parts else []
+    need = max(0, QUERY_BACKLOG_TARGET - pending_n)
+
+    # sample parts to drive queries (shuffle each top-up so we don't get "stuck")
+    parts = (
+        db.execute(
+            select(DemoPart.token)
+            .where(DemoPart.run_id == run.id, DemoPart.status == DemoPartStatus.validated)
+            .limit(800)
+        )
+        .scalars()
+        .all()
+    )
+    random.shuffle(parts)
+    toks = parts[: min(len(parts), max(20, need // 2))] if parts else []
 
     qs: list[str] = []
-
-    # LLM query generation removed (demo stability): always use fallback templates.
-    toks = sample or (parts[:10] if parts else [])
-    for t in toks[:10]:
+    for t in toks:
         qs.append(f'"{t}" aircraft parts supplier')
         qs.append(f'"{t}" inventory "Request a Quote"')
-    # generic seeds-based queries
+
     for sd in (run.seed_domains or [])[:3]:
         qs.append(f"{sd} competitors aircraft parts")
 
-    # insert
+    # Insert up to `need`, avoiding only duplicates that are currently pending/running.
     added = 0
-    for q in qs[:40]:
-        exists = db.execute(
-            select(DemoSerperQuery).where(DemoSerperQuery.run_id == run.id, DemoSerperQuery.query == q)
+    for q in qs:
+        if added >= need:
+            break
+        in_flight = db.execute(
+            select(DemoSerperQuery)
+            .where(DemoSerperQuery.run_id == run.id)
+            .where(DemoSerperQuery.query == q)
+            .where(DemoSerperQuery.status.in_([DemoSerperQueryStatus.pending, DemoSerperQueryStatus.running]))
+            .limit(1)
         ).scalar_one_or_none()
-        if exists:
+        if in_flight:
             continue
         db.add(DemoSerperQuery(run_id=run.id, query=q, status=DemoSerperQueryStatus.pending))
         added += 1
+
     db.commit()
 
     if added:
-        emit(db, run_id=run.id, type=DemoEventType.DECISION, data={
-            "title": "Queued Serper queries",
-            "meta": f"added={added}",
-            "body": (qs[:5] or []).__repr__(),
-        })
+        emit(
+            db,
+            run_id=run.id,
+            type=DemoEventType.DECISION,
+            data={
+                "title": "Queued Serper queries",
+                "meta": f"added={added} pending_target={QUERY_BACKLOG_TARGET}",
+                "body": (qs[:5] or []).__repr__(),
+            },
+        )
 
 
 async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
@@ -287,7 +315,8 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                         .limit(1)
                     ).scalar_one_or_none()
                     if not q:
-                        await asyncio.sleep(0.25)
+                        # nothing pending; back off a bit
+                        await asyncio.sleep(0.6)
                         continue
 
                     q.status = DemoSerperQueryStatus.running
@@ -329,6 +358,9 @@ async def serper_worker(run_id: int, lane: int, sem: asyncio.Semaphore):
                         "serper_calls_used": ctl.serper_calls_used,
                         "now": f"Serper lane {lane+1}: {q.query}",
                     })
+
+                    # slow down a touch so the UI is readable
+                    await asyncio.sleep(SERPER_LANE_DELAY_S)
 
                     # Extract supplier domains from serper results
                     org = (res.get("organic") or []) if isinstance(res, dict) else []

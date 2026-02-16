@@ -277,10 +277,13 @@ def list_tasks(run_id: int, db: Session = Depends(db_session)):
 
 
 def _ensure_demo_control(db: Session, run_id: int) -> DemoRunControl:
+    import os
+
     c = db.get(DemoRunControl, run_id)
     if c:
         return c
-    c = DemoRunControl(run_id=run_id, state="stopped", serper_calls_used=0, serper_budget=5000)
+    budget = int(os.getenv("DEMO_SERPER_BUDGET", "2000"))
+    c = DemoRunControl(run_id=run_id, state="stopped", serper_calls_used=0, serper_budget=budget)
     db.add(c)
     db.commit()
     return c
@@ -360,6 +363,14 @@ def demo_run(request: Request, run_id: int, db: Session = Depends(db_session)):
 @app.post("/runs/{run_id}/demo/start")
 def demo_start(run_id: int, db: Session = Depends(db_session)):
     c = _ensure_demo_control(db, run_id)
+
+    # If env budget changed, keep control row in sync for new demos.
+    import os
+
+    desired_budget = int(os.getenv("DEMO_SERPER_BUDGET", "2000"))
+    if int(c.serper_budget or 0) != desired_budget:
+        c.serper_budget = desired_budget
+        db.commit()
 
     # Ensure parts exist for demo.
     seeded = _ensure_demo_parts_seeded(db, run_id)
