@@ -221,47 +221,14 @@ async def generate_queries(db: Session, run: Run, target_n: int = 120):
 
     qs: list[str] = []
 
-    # 1) LLM attempt
-    try:
-        planner, _worker = strategy_models()
-        schema = {
-            "type": "object",
-            "properties": {"queries": {"type": "array", "items": {"type": "string"}, "minItems": 10, "maxItems": 40}},
-            "required": ["queries"],
-            "additionalProperties": False,
-        }
-        prompt = (
-            "You are generating Google search queries (for Serper) to discover aircraft parts suppliers who sell the given parts. "
-            "Return queries only, no URLs. Prefer queries that find inventory/RFQ seller sites.\n\n"
-            f"Example part tokens: {sample}\n"
-            f"Seeds: {run.seed_domains}\n"
-            f"Directions: {run.directions}\n\n"
-            "Output JSON {queries:[...]}"
-        )
-        # Don't let the demo stall if the LLM is slow/down.
-        resp = await asyncio.wait_for(
-            responses_create(model=planner, input_text=prompt, json_schema=schema, temperature=0.2),
-            timeout=float(os.getenv("DEMO_LLM_TIMEOUT_S", "8")),
-        )
-        j = extract_json(resp) or {}
-        qs = [q.strip() for q in (j.get("queries") or []) if (q or "").strip()]
-    except Exception as e:
-        emit(db, run_id=run.id, type=DemoEventType.DECISION, data={
-            "title": "LLM query generation failed (fallback)",
-            "meta": "generate_queries",
-            "body": repr(e),
-        })
-        qs = []
-
-    # 2) Fallback templates
-    if not qs:
-        toks = sample or (parts[:10] if parts else [])
-        for t in toks[:10]:
-            qs.append(f'"{t}" aircraft parts supplier')
-            qs.append(f'"{t}" inventory "Request a Quote"')
-        # generic seeds-based queries
-        for sd in (run.seed_domains or [])[:3]:
-            qs.append(f"{sd} competitors aircraft parts")
+    # LLM query generation removed (demo stability): always use fallback templates.
+    toks = sample or (parts[:10] if parts else [])
+    for t in toks[:10]:
+        qs.append(f'"{t}" aircraft parts supplier')
+        qs.append(f'"{t}" inventory "Request a Quote"')
+    # generic seeds-based queries
+    for sd in (run.seed_domains or [])[:3]:
+        qs.append(f"{sd} competitors aircraft parts")
 
     # insert
     added = 0
