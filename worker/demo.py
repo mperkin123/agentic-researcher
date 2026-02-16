@@ -774,11 +774,14 @@ async def run_demo_loop():
                     rid = int(ctl.run_id) if ctl else 0
                     if rid:
                         c = db.get(DemoRunControl, rid)
-                        emit(db, run_id=rid, type=DemoEventType.RUN_STATE, data={
-                            "state": c.state if c else "unknown",
-                            "serper_calls_used": int((c.serper_calls_used if c else 0)),
-                            "now": "worker heartbeat",
-                        })
+                        emit_run_state_throttled(
+                            db,
+                            run_id=rid,
+                            state=(c.state if c else "unknown"),
+                            serper_calls_used=int((c.serper_calls_used if c else 0)),
+                            now="worker heartbeat",
+                            min_interval_s=5.0,
+                        )
                 finally:
                     db.close()
             except Exception as e:
