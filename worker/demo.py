@@ -313,11 +313,22 @@ async def generate_queries(db: Session, run: Run):
 
     qs: list[str] = []
     for t in toks:
-        qs.append(f'"{t}" aircraft parts supplier')
-        qs.append(f'"{t}" inventory "Request a Quote"')
+        tt = (t or "").strip()
+        if not tt:
+            continue
+
+        # Broad queries first (higher chance of organic results)
+        qs.append(f'"{tt}" aircraft parts')
+        qs.append(f'"{tt}" aviation')
+        qs.append(f'"{tt}" supplier')
+        qs.append(f'"{tt}" distributor')
+
+        # One commerce-intent query (but keep it optional/sparse)
+        qs.append(f'"{tt}" "Request a Quote"')
 
     for sd in (run.seed_domains or [])[:3]:
-        qs.append(f"{sd} competitors aircraft parts")
+        qs.append(f"{sd} competitors")
+        qs.append(f"{sd} aircraft parts")
 
     # Insert up to `need`, avoiding only duplicates that are currently pending/running.
     added = 0
