@@ -1,48 +1,89 @@
-# Agentic Researcher (API + worker)
+# NAICS Classifier API (NAICS 2017)
 
-Deployable human-in-the-loop domain discovery + verification + graph building.
+Hybrid **vector search (OpenAI embeddings)** + **LLM re-rank (OpenAI chat)** over NAICS code pages scraped from naics.com.
 
-## Local dev (quick)
+## Quick start (local)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd /home/curl/.openclaw/workspace-dealmatch
 
-export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/dealmatch"
-export OPENAI_API_KEY=... 
-export SERPER_API_KEY=...
+# 1) install deps
+npm install
 
-uvicorn app.main:app --reload
+# 2) build embeddings index (writes out/naics-2017-embeddings.jsonl)
+export OPENAI_API_KEY="sk-..."
+npm run build:index
 
-# in another terminal
-python -m worker.run
+# 3) run API server
+export PORT=8787
+npm start
 ```
 
-## Environment variables
+Open the local UI:
+- http://localhost:8787/
 
-- `DATABASE_URL` (Postgres)
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL_STRATEGY` (optional)
-- `SERPER_API_KEY`
+## API
 
-## Render deployment
+### Health
 
-This repo includes a `render.yaml` blueprint that creates:
-- a Postgres database
-- a Web service (FastAPI)
-- a Worker service (background tasks)
+`GET /health`
 
-On Render: **New → Blueprint** and select this repo.
+Example:
+```bash
+curl -sS https://YOUR_HOST/health
+```
 
-You must set secrets:
-- `OPENAI_API_KEY`
-- `SERPER_API_KEY`
+### Classify
 
-Optional overrides:
-- `OPENAI_PLANNER_MODEL` (default `gpt-5`)
-- `OPENAI_WORKER_MODEL` (default `gpt-4.1-mini`)
+`POST /classify`
 
-## Notes
+Request JSON:
+```json
+{ "text": "<business description, up to 10,000 chars>" }
+```
 
-Legacy scripts from the OpenClaw workspace remain at repo root for now; the new system lives under `app/`, `worker/`, `dealmatch/`.
+Response JSON:
+```json
+{
+  "top": [
+    { "code": "238160", "title": "Roofing Contractors", "score": 100, "source_url": "..." },
+    { "code": "238170", "title": "Siding Contractors", "score": 42, "source_url": "..." },
+    { "code": "238110", "title": "Poured Concrete Foundation and Structure Contractors", "score": 19, "source_url": "..." }
+  ]
+}
+```
+
+Example curl:
+```bash
+curl -sS -X POST https://YOUR_HOST/classify \
+  -H 'content-type: application/json' \
+  -d '{"text":"We install and repair residential and commercial roofs, including skylights, metal roofing, and roof coatings."}'
+```
+
+## Render deploy
+
+This repo is ready for Render as a **Web Service**.
+
+### 1) Create the service
+- Root Directory: (repo root)
+- Build Command:
+  ```bash
+  npm ci && npm run build:index
+  ```
+- Start Command:
+  ```bash
+  npm start
+  ```
+
+### 2) Environment variables (Render dashboard)
+Set:
+- `OPENAI_API_KEY` (required)
+
+Optional:
+- `EMBED_MODEL` (default `text-embedding-3-small`)
+- `LLM_MODEL` (default `gpt-4o-mini`)
+- `TOPK` (default `25`)
+
+### Notes
+- The embeddings index is built during Render build. That means Render must have `OPENAI_API_KEY` available during build.
+- If you prefer faster deploys and no build-time API usage, you can prebuild `out/naics-2017-embeddings.jsonl` locally and commit it, then change the Render Build Command to `npm ci`.

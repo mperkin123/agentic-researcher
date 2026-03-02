@@ -1,0 +1,21 @@
+{
+  "name": "naics-classifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "server_vector.js",
+  "scripts": {
+    "build:index": "node build_embeddings_index.js --in=out/naics-2017.sharded.jsonl --out=out/naics-2017-embeddings.jsonl",
+    "start": "node server_vector.js --emb=out/naics-2017-embeddings.jsonl",
+    "start:lunr": "node naics_api_server.js --port=8787"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "express": "^5.1.0",
+    "lunr": "^2.3.9",
+    "openai": "^5.12.2",
+    "p-limit": "^6.2.0",
+    "undici": "^7.16.0",
+    "zod": "^3.23.8"
+  }
+}
